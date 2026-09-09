@@ -66,3 +66,19 @@ Bangumi v0 API ──┘              └───────> 稳定查询 API
 .\gradlew.bat prepareDockerContext
 docker build -t bangumi-data:local .
 ```
+
+## 发布
+
+推送带 `v` 前缀的 SemVer 标签后，GitHub Actions 会运行测试、构建 `linux/amd64` 与 `linux/arm64` 镜像、发布到 GHCR，并创建同名 GitHub Release：
+
+```powershell
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+发布产物：
+
+```text
+ghcr.io/4o4e/bangumi-data:v0.1.0
+ghcr.io/4o4e/bangumi-data:latest
+```
