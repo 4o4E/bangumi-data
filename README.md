@@ -84,6 +84,17 @@ GET /openapi.yaml
 - `GET /api/v1/catalog/characters`：按性别和熟悉度分页获取完整角色卡片数据。
 - `POST /api/v1/admin/sync`：手动触发后台同步，可选 `force=true`。
 
+## Compose 部署
+
+复制 `.env.example` 为 `.env` 并填写 token 和 PostgreSQL 密码后，Compose 会直接使用已发布的 GHCR 镜像，不会在部署机本地构建：
+
+```powershell
+docker compose pull
+docker compose up -d
+```
+
+当前固定版本为 `ghcr.io/4o4e/bangumi-data:v0.1.2`；升级时先修改 `docker-compose.yml` 中的镜像标签，再重新执行上述命令。
+
 ## 构建
 
 - Kotlin `2.2.21`
@@ -106,13 +117,13 @@ docker build -t bangumi-data:local .
 推送带 `v` 前缀的 SemVer 标签后，GitHub Actions 会运行测试、构建 `linux/amd64` 与 `linux/arm64` 镜像、发布到 GHCR，并创建同名 GitHub Release：
 
 ```powershell
-git tag v0.1.0
-git push origin v0.1.0
+git tag v0.1.2
+git push origin v0.1.2
 ```
 
 发布产物：
 
 ```text
-ghcr.io/4o4e/bangumi-data:v0.1.0
+ghcr.io/4o4e/bangumi-data:v0.1.2
 ghcr.io/4o4e/bangumi-data:latest
 ```
