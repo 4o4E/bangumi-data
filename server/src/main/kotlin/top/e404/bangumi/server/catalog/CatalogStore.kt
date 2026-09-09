@@ -1,0 +1,448 @@
+package top.e404.bangumi.server.catalog
+
+import top.e404.bangumi.api.CatalogCharacter
+import top.e404.bangumi.api.CatalogPage
+import top.e404.bangumi.api.CatalogStatus
+import top.e404.bangumi.api.CatalogWork
+import top.e404.bangumi.api.CharacterGender
+import top.e404.bangumi.api.CharacterRelation
+import top.e404.bangumi.api.FamiliarityTier
+import top.e404.bangumi.api.PopularityMetric
+import top.e404.bangumi.server.archive.ArchiveCharacter
+import top.e404.bangumi.server.archive.ArchiveImportSummary
+import top.e404.bangumi.server.archive.ArchiveSubject
+import top.e404.bangumi.server.archive.ArchiveSubjectCharacter
+import java.sql.Connection
+import java.sql.ResultSet
+import javax.sql.DataSource
+
+interface CatalogReader {
+    fun status(): CatalogStatus
+    fun characters(gender: CharacterGender, tiers: Set<FamiliarityTier>, offset: Int, limit: Int): CatalogPage<CatalogCharacter>
+}
+
+data class CharacterEnrichment(
+    val id: Long,
+    val name: String,
+    val aliases: List<String>,
+    val gender: CharacterGender?,
+    val description: String?,
+    val imageUrl: String?,
+    val nsfw: Boolean,
+)
+
+data class SubjectEnrichment(val id: Long, val name: String?, val imageUrl: String?)
+
+class CatalogStore(private val dataSource: DataSource) : CatalogReader {
+    fun beginGeneration(id: String, sourceVersion: String, digest: String, sourceCreatedAt: Long) {
+        dataSource.connection.use { connection ->
+            connection.prepareStatement(
+                """
+                INSERT INTO bangumi_catalog_generation(id, source_version, source_digest, source_created_at, status, created_at)
+                VALUES (?, ?, ?, ?, 'IMPORTING', ?)
+                ON CONFLICT(id) DO UPDATE SET status = 'IMPORTING', error = NULL
+                """.trimIndent(),
+            ).use { statement ->
+                statement.setString(1, id)
+                statement.setString(2, sourceVersion)
+                statement.setString(3, digest)
+                statement.setLong(4, sourceCreatedAt)
+                statement.setLong(5, System.currentTimeMillis())
+                statement.executeUpdate()
+            }
+            connection.prepareStatement("DELETE FROM bangumi_subject WHERE generation_id = ?").use {
+                it.setString(1, id)
+                it.executeUpdate()
+            }
+            connection.prepareStatement("DELETE FROM bangumi_character WHERE generation_id = ?").use {
+                it.setString(1, id)
+                it.executeUpdate()
+            }
+        }
+    }
+
+    suspend fun <T> withSyncLock(block: suspend () -> T): T? = dataSource.connection.use { connection ->
+        val acquired = connection.prepareStatement("SELECT pg_try_advisory_lock(?)").use {
+            it.setLong(1, SYNC_LOCK_ID)
+            it.executeQuery().use { result -> result.next() && result.getBoolean(1) }
+        }
+        if (!acquired) return@use null
+        try {
+            block()
+        } finally {
+            connection.prepareStatement("SELECT pg_advisory_unlock(?)").use {
+                it.setLong(1, SYNC_LOCK_ID)
+                it.executeQuery().close()
+            }
+        }
+    }
+
+    fun failGeneration(generation: String?, error: Throwable) {
+        dataSource.connection.use { connection ->
+            if (generation != null) connection.prepareStatement(
+                "UPDATE bangumi_catalog_generation SET status = 'FAILED', error = ? WHERE id = ?",
+            ).use { it.setString(1, error.message); it.setString(2, generation); it.executeUpdate() }
+        }
+        updateSyncState(false, null, error.stackTraceToString().take(8_000))
+    }
+
+    fun importArchive(
+        generation: String,
+        subjects: Sequence<ArchiveSubject>,
+        characters: Sequence<ArchiveCharacter>,
+        relations: Sequence<ArchiveSubjectCharacter>,
+        sourceTime: Long,
+    ): ArchiveImportSummary = dataSource.connection.use { connection ->
+        connection.autoCommit = false
+        try {
+            val subjectCount = importSubjects(connection, generation, subjects, sourceTime)
+            val characterCount = importCharacters(connection, generation, characters, sourceTime)
+            val relationCount = importRelations(connection, generation, relations)
+            connection.prepareStatement(
+                """
+                DELETE FROM bangumi_character c
+                WHERE c.generation_id = ? AND NOT EXISTS (
+                    SELECT 1 FROM bangumi_subject_character sc
+                    WHERE sc.generation_id = c.generation_id AND sc.character_id = c.id
+                )
+                """.trimIndent(),
+            ).use { it.setString(1, generation); it.executeUpdate() }
+            connection.commit()
+            ArchiveImportSummary(subjectCount, characterCount, relationCount)
+        } catch (error: Throwable) {
+            connection.rollback()
+            throw error
+        } finally {
+            connection.autoCommit = true
+        }
+    }
+
+    fun applyPopularity(generation: String, selector: PopularitySelector): Int {
+        val grouped = linkedMapOf<Long, MutableList<PopularityCandidate>>()
+        dataSource.connection.use { connection ->
+            connection.prepareStatement(
+                """
+                SELECT sc.subject_id, sc.character_id, c.collects
+                FROM bangumi_subject_character sc
+                JOIN bangumi_character c ON c.generation_id = sc.generation_id AND c.id = sc.character_id
+                WHERE sc.generation_id = ? AND sc.relation_type IN (1, 2)
+                ORDER BY sc.subject_id, c.collects DESC, c.id
+                """.trimIndent(),
+            ).use { statement ->
+                statement.setString(1, generation)
+                statement.executeQuery().use { result ->
+                    while (result.next()) grouped.getOrPut(result.getLong(1), ::mutableListOf)
+                        .add(PopularityCandidate(result.getLong(2), result.getLong(3)))
+                }
+            }
+        }
+        dataSource.connection.use { connection ->
+            connection.autoCommit = false
+            try {
+                connection.prepareStatement(
+                    """
+                    UPDATE bangumi_subject_character
+                    SET popularity_rank = ?, familiarity = ?, selection_reason = ?
+                    WHERE generation_id = ? AND subject_id = ? AND character_id = ?
+                    """.trimIndent(),
+                ).use { statement ->
+                    grouped.forEach { (subjectId, candidates) ->
+                        val fullRank = candidates.sortedWith(compareByDescending<PopularityCandidate> { it.collects }.thenBy { it.characterId })
+                            .mapIndexed { index, item -> item.characterId to index + 1 }.toMap()
+                        val selected = selector.select(candidates).associateBy(PopularitySelection::characterId)
+                        candidates.forEach { candidate ->
+                            val choice = selected[candidate.characterId]
+                            statement.setInt(1, fullRank.getValue(candidate.characterId))
+                            statement.setString(2, choice?.tier?.name ?: FamiliarityTier.LONG_TAIL.name)
+                            statement.setString(3, choice?.reason)
+                            statement.setString(4, generation)
+                            statement.setLong(5, subjectId)
+                            statement.setLong(6, candidate.characterId)
+                            statement.addBatch()
+                        }
+                    }
+                    statement.executeBatch()
+                }
+                connection.commit()
+            } catch (error: Throwable) {
+                connection.rollback()
+                throw error
+            } finally {
+                connection.autoCommit = true
+            }
+        }
+        return grouped.size
+    }
+
+    fun selectedCharacterIds(generation: String): List<Long> = dataSource.connection.use { connection ->
+        connection.prepareStatement(
+            """
+            SELECT DISTINCT character_id FROM bangumi_subject_character
+            WHERE generation_id = ? AND familiarity IN ('CORE', 'FAMILIAR') ORDER BY character_id
+            """.trimIndent(),
+        ).use { statement ->
+            statement.setString(1, generation)
+            statement.executeQuery().use { result -> buildList { while (result.next()) add(result.getLong(1)) } }
+        }
+    }
+
+    fun selectedSubjectIds(generation: String): List<Long> = dataSource.connection.use { connection ->
+        connection.prepareStatement(
+            """
+            SELECT DISTINCT subject_id FROM bangumi_subject_character
+            WHERE generation_id = ? AND familiarity IN ('CORE', 'FAMILIAR') ORDER BY subject_id
+            """.trimIndent(),
+        ).use { statement ->
+            statement.setString(1, generation)
+            statement.executeQuery().use { result -> buildList { while (result.next()) add(result.getLong(1)) } }
+        }
+    }
+
+    fun selectedEligibleSubjectIds(generation: String): List<Long> = dataSource.connection.use { connection ->
+        connection.prepareStatement(
+            """
+            SELECT DISTINCT sc.subject_id FROM bangumi_subject_character sc
+            JOIN bangumi_character c ON c.generation_id = sc.generation_id AND c.id = sc.character_id
+            WHERE sc.generation_id = ? AND sc.familiarity IN ('CORE', 'FAMILIAR') AND c.eligible = TRUE
+            """.trimIndent(),
+        ).use { statement ->
+            statement.setString(1, generation)
+            statement.executeQuery().use { result -> buildList { while (result.next()) add(result.getLong(1)) } }
+        }
+    }
+
+    fun saveCharacterEnrichment(generation: String, value: CharacterEnrichment) {
+        dataSource.connection.use { connection ->
+            connection.prepareStatement(
+                """
+                UPDATE bangumi_character SET name_cn = ?, aliases = ?, gender = ?, summary = ?, image_url = ?,
+                    nsfw = ?, eligible = ?, enriched = TRUE, source_updated_at = ?
+                WHERE generation_id = ? AND id = ?
+                """.trimIndent(),
+            ).use { statement ->
+                statement.setString(1, value.name)
+                statement.setArray(2, connection.createArrayOf("text", value.aliases.toTypedArray()))
+                statement.setString(3, value.gender?.name)
+                statement.setString(4, value.description)
+                statement.setString(5, value.imageUrl)
+                statement.setBoolean(6, value.nsfw)
+                statement.setBoolean(7, !value.nsfw && value.gender != null && value.name.isNotBlank() && value.imageUrl != null)
+                statement.setLong(8, System.currentTimeMillis())
+                statement.setString(9, generation)
+                statement.setLong(10, value.id)
+                statement.executeUpdate()
+            }
+        }
+    }
+
+    fun saveSubjectEnrichment(generation: String, value: SubjectEnrichment) {
+        dataSource.connection.use { connection ->
+            connection.prepareStatement(
+                "UPDATE bangumi_subject SET name_cn = COALESCE(NULLIF(?, ''), name_cn), image_url = ?, source_updated_at = ? WHERE generation_id = ? AND id = ?",
+            ).use { statement ->
+                statement.setString(1, value.name)
+                statement.setString(2, value.imageUrl)
+                statement.setLong(3, System.currentTimeMillis())
+                statement.setString(4, generation)
+                statement.setLong(5, value.id)
+                statement.executeUpdate()
+            }
+        }
+    }
+
+    fun activate(generation: String) {
+        dataSource.connection.use { connection ->
+            connection.autoCommit = false
+            try {
+                connection.prepareStatement("SELECT pg_advisory_xact_lock(?)").use {
+                    it.setLong(1, SYNC_LOCK_ID)
+                    it.executeQuery().close()
+                }
+                val eligible = connection.prepareStatement(
+                    "SELECT COUNT(*) FROM bangumi_character WHERE generation_id = ? AND eligible = TRUE",
+                ).use { statement ->
+                    statement.setString(1, generation)
+                    statement.executeQuery().use { it.next(); it.getLong(1) }
+                }
+                check(eligible > 0) { "拒绝激活空角色目录" }
+                connection.prepareStatement(
+                    "UPDATE bangumi_catalog_generation SET status = 'ACTIVE', activated_at = ? WHERE id = ?",
+                ).use { it.setLong(1, System.currentTimeMillis()); it.setString(2, generation); it.executeUpdate() }
+                connection.prepareStatement(
+                    "UPDATE bangumi_catalog_state SET active_generation_id = ?, sync_running = FALSE, sync_phase = NULL, last_error = NULL WHERE singleton = TRUE",
+                ).use { it.setString(1, generation); it.executeUpdate() }
+                connection.prepareStatement("DELETE FROM bangumi_catalog_generation WHERE id <> ?").use {
+                    it.setString(1, generation)
+                    it.executeUpdate()
+                }
+                connection.commit()
+            } catch (error: Throwable) {
+                connection.rollback()
+                throw error
+            } finally {
+                connection.autoCommit = true
+            }
+        }
+    }
+
+    fun updateSyncState(running: Boolean, phase: String?, error: String?) {
+        dataSource.connection.use { connection ->
+            connection.prepareStatement(
+                "UPDATE bangumi_catalog_state SET sync_running = ?, sync_phase = ?, last_error = ? WHERE singleton = TRUE",
+            ).use { it.setBoolean(1, running); it.setString(2, phase); it.setString(3, error); it.executeUpdate() }
+        }
+    }
+
+    override fun status(): CatalogStatus = dataSource.connection.use { connection ->
+        connection.prepareStatement(
+            """
+            SELECT s.active_generation_id, s.sync_running, s.sync_phase, s.last_error,
+                   g.source_version, g.source_created_at, g.activated_at,
+                   (SELECT COUNT(*) FROM bangumi_character c WHERE c.generation_id = s.active_generation_id AND c.eligible = TRUE)
+            FROM bangumi_catalog_state s LEFT JOIN bangumi_catalog_generation g ON g.id = s.active_generation_id
+            WHERE s.singleton = TRUE
+            """.trimIndent(),
+        ).use { statement ->
+            statement.executeQuery().use { result ->
+                result.next()
+                CatalogStatus(
+                    generation = result.getString(1), syncRunning = result.getBoolean(2), syncPhase = result.getString(3),
+                    lastError = result.getString(4), sourceVersion = result.getString(5),
+                    sourceCreatedAt = result.nullableLong(6), activatedAt = result.nullableLong(7), characterCount = result.getLong(8),
+                )
+            }
+        }
+    }
+
+    override fun characters(gender: CharacterGender, tiers: Set<FamiliarityTier>, offset: Int, limit: Int): CatalogPage<CatalogCharacter> {
+        val status = status()
+        val generation = status.generation ?: return CatalogPage(emptyList(), offset, limit, 0, "")
+        val tierNames = tiers.ifEmpty { setOf(FamiliarityTier.CORE, FamiliarityTier.FAMILIAR) }.map(FamiliarityTier::name).toTypedArray()
+        return dataSource.connection.use { connection ->
+            val total = connection.prepareStatement(
+                """
+                SELECT COUNT(DISTINCT c.id) FROM bangumi_character c JOIN bangumi_subject_character sc
+                  ON sc.generation_id = c.generation_id AND sc.character_id = c.id
+                WHERE c.generation_id = ? AND c.gender = ? AND c.eligible = TRUE AND sc.familiarity = ANY(?)
+                """.trimIndent(),
+            ).use { statement ->
+                statement.setString(1, generation); statement.setString(2, gender.name)
+                statement.setArray(3, connection.createArrayOf("text", tierNames))
+                statement.executeQuery().use { it.next(); it.getLong(1) }
+            }
+            val rows = connection.prepareStatement(
+                """
+                SELECT DISTINCT c.id, c.name_cn, c.aliases, c.summary, c.image_url, c.collects, c.source_updated_at
+                FROM bangumi_character c JOIN bangumi_subject_character sc
+                  ON sc.generation_id = c.generation_id AND sc.character_id = c.id
+                WHERE c.generation_id = ? AND c.gender = ? AND c.eligible = TRUE AND sc.familiarity = ANY(?)
+                ORDER BY c.id LIMIT ? OFFSET ?
+                """.trimIndent(),
+            ).use { statement ->
+                statement.setString(1, generation); statement.setString(2, gender.name)
+                statement.setArray(3, connection.createArrayOf("text", tierNames)); statement.setInt(4, limit); statement.setInt(5, offset)
+                statement.executeQuery().use { result -> buildList { while (result.next()) add(result.toCharacterRow()) } }
+            }
+            val ids = rows.map(CharacterRow::id)
+            val works = if (ids.isEmpty()) emptyMap() else loadWorks(connection, generation, ids)
+            CatalogPage(
+                items = rows.map { row -> CatalogCharacter(
+                    id = row.id, name = row.name, aliases = row.aliases, gender = gender,
+                    description = row.description, imageUrl = row.imageUrl, works = works[row.id].orEmpty(),
+                    popularities = listOf(PopularityMetric("bangumi", "collects", row.collects)), sourceUpdatedAt = row.sourceUpdatedAt,
+                ) },
+                offset = offset, limit = limit, total = total, generation = generation,
+            )
+        }
+    }
+
+    private fun importSubjects(connection: Connection, generation: String, values: Sequence<ArchiveSubject>, sourceTime: Long): Long {
+        var count = 0L
+        connection.prepareStatement(
+            "INSERT INTO bangumi_subject(generation_id,id,type,name,name_cn,summary,image_url,nsfw,source_updated_at) VALUES (?,?,?,?,?,?,NULL,?,?)",
+        ).use { statement ->
+            values.filter { it.type in setOf(2, 4) && !it.nsfw && !it.childOriented() }.forEach { value ->
+                val nameCn = value.nameCn.trim().ifBlank { value.name.takeIf(String::containsHan).orEmpty() }
+                if (nameCn.isBlank()) return@forEach
+                statement.setString(1, generation); statement.setLong(2, value.id); statement.setInt(3, value.type)
+                statement.setString(4, value.name); statement.setString(5, nameCn); statement.setString(6, value.summary)
+                statement.setBoolean(7, value.nsfw); statement.setLong(8, sourceTime); statement.addBatch(); count++
+                if (count % BATCH_SIZE == 0L) statement.executeBatch()
+            }
+            statement.executeBatch()
+        }
+        return count
+    }
+
+    private fun importCharacters(connection: Connection, generation: String, values: Sequence<ArchiveCharacter>, sourceTime: Long): Long {
+        var count = 0L
+        connection.prepareStatement(
+            "INSERT INTO bangumi_character(generation_id,id,entity_type,name,summary,comments,collects,source_updated_at) VALUES (?,?,?,?,?,?,?,?)",
+        ).use { statement ->
+            values.filter { it.role == 1 }.forEach { value ->
+                statement.setString(1, generation); statement.setLong(2, value.id); statement.setInt(3, value.role)
+                statement.setString(4, value.name); statement.setString(5, value.summary); statement.setLong(6, value.comments)
+                statement.setLong(7, value.collects); statement.setLong(8, sourceTime); statement.addBatch(); count++
+                if (count % BATCH_SIZE == 0L) statement.executeBatch()
+            }
+            statement.executeBatch()
+        }
+        return count
+    }
+
+    private fun importRelations(connection: Connection, generation: String, values: Sequence<ArchiveSubjectCharacter>): Long {
+        var attempted = 0L
+        connection.prepareStatement(
+            """
+            INSERT INTO bangumi_subject_character(generation_id,subject_id,character_id,relation_type,relation_order)
+            SELECT ?,?,?,?,? WHERE EXISTS (SELECT 1 FROM bangumi_subject WHERE generation_id=? AND id=?)
+              AND EXISTS (SELECT 1 FROM bangumi_character WHERE generation_id=? AND id=?) ON CONFLICT DO NOTHING
+            """.trimIndent(),
+        ).use { statement ->
+            values.filter { it.type in 1..3 }.forEach { value ->
+                statement.setString(1, generation); statement.setLong(2, value.subjectId); statement.setLong(3, value.characterId)
+                statement.setInt(4, value.type); statement.setInt(5, value.order); statement.setString(6, generation)
+                statement.setLong(7, value.subjectId); statement.setString(8, generation); statement.setLong(9, value.characterId)
+                statement.addBatch(); attempted++
+                if (attempted % BATCH_SIZE == 0L) statement.executeBatch()
+            }
+            statement.executeBatch()
+        }
+        return connection.prepareStatement(
+            "SELECT COUNT(*) FROM bangumi_subject_character WHERE generation_id = ?",
+        ).use { statement ->
+            statement.setString(1, generation)
+            statement.executeQuery().use { result -> result.next(); result.getLong(1) }
+        }
+    }
+
+    private fun loadWorks(connection: Connection, generation: String, characterIds: List<Long>): Map<Long, List<CatalogWork>> {
+        return connection.prepareStatement(
+            """
+            SELECT sc.character_id,s.id,s.type,s.name_cn,s.image_url,sc.relation_type,sc.familiarity,sc.popularity_rank
+            FROM bangumi_subject_character sc JOIN bangumi_subject s ON s.generation_id=sc.generation_id AND s.id=sc.subject_id
+            WHERE sc.generation_id=? AND sc.character_id=ANY(?) ORDER BY sc.character_id,sc.familiarity,sc.popularity_rank,s.id
+            """.trimIndent(),
+        ).use { statement ->
+            statement.setString(1, generation); statement.setArray(2, connection.createArrayOf("int8", characterIds.toTypedArray()))
+            statement.executeQuery().use { result ->
+                buildMap<Long, MutableList<CatalogWork>> {
+                    while (result.next()) getOrPut(result.getLong(1), ::mutableListOf).add(
+                        CatalogWork(result.getLong(2), result.getInt(3), result.getString(4), result.getString(5),
+                            relation(result.getInt(6)), FamiliarityTier.valueOf(result.getString(7)), result.getInt(8)),
+                    )
+                }
+            }
+        }
+    }
+
+    private data class CharacterRow(val id: Long, val name: String, val aliases: List<String>, val description: String?, val imageUrl: String, val collects: Long, val sourceUpdatedAt: Long)
+    private fun ResultSet.toCharacterRow() = CharacterRow(getLong(1), getString(2), (getArray(3).array as Array<*>).map { it.toString() }, getString(4), getString(5), getLong(6), getLong(7))
+    private fun ResultSet.nullableLong(index: Int): Long? = getLong(index).let { if (wasNull()) null else it }
+    private fun relation(value: Int) = when (value) { 1 -> CharacterRelation.PROTAGONIST; 2 -> CharacterRelation.SUPPORTING; else -> CharacterRelation.CAMEO }
+
+    companion object { const val SYNC_LOCK_ID = 0x42474D44L; private const val BATCH_SIZE = 5_000L }
+}
+
+private fun ArchiveSubject.childOriented() = "子供向" in metaTags || tags.any { it.name == "子供向" && it.count >= 2 }
+private fun String.containsHan() = codePoints().anyMatch { Character.UnicodeScript.of(it) == Character.UnicodeScript.HAN }

@@ -22,6 +22,8 @@ services:
       BANGUMI_DATA_DATABASE_PASSWORD: ${POSTGRES_PASSWORD}
     ports:
       - "8080:8080"
+    volumes:
+      - bangumi-download:/app/data
     depends_on:
       postgres:
         condition: service_healthy
@@ -29,3 +31,4 @@ services:
 
 volumes:
   bangumi-postgres:
+  bangumi-download:

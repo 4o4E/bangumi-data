@@ -4,7 +4,9 @@ WORKDIR /app
 LABEL org.opencontainers.image.source="https://github.com/4o4E/bangumi-data"
 LABEL org.opencontainers.image.description="通用 Bangumi 数据采集、规范化与查询服务"
 
-RUN useradd --system --uid 10001 --create-home bangumi
+RUN useradd --system --uid 10001 --create-home bangumi \
+    && mkdir -p /app/data \
+    && chown bangumi:bangumi /app/data
 COPY --chown=bangumi:bangumi build/docker/app /app
 RUN chmod +x /app/bin/bangumi-data
 

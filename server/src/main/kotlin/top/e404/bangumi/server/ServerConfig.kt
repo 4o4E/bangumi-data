@@ -7,6 +7,11 @@ data class ServerConfig(
     val databaseUrl: String,
     val databaseUser: String,
     val databasePassword: String,
+    val syncEnabled: Boolean = true,
+    val syncIntervalHours: Long = 6,
+    val requestDelayMillis: Long = 250,
+    val archiveLatestUrl: String = "https://raw.githubusercontent.com/bangumi/Archive/master/aux/latest.json",
+    val dataDirectory: String = "data",
 ) {
     companion object {
         fun fromEnvironment(environment: Map<String, String> = System.getenv()): ServerConfig {
@@ -22,6 +27,12 @@ data class ServerConfig(
                 databaseUrl = environment.required("BANGUMI_DATA_DATABASE_URL"),
                 databaseUser = environment.required("BANGUMI_DATA_DATABASE_USER"),
                 databasePassword = environment.required("BANGUMI_DATA_DATABASE_PASSWORD"),
+                syncEnabled = environment["BANGUMI_DATA_SYNC_ENABLED"]?.toBooleanStrictOrNull() ?: true,
+                syncIntervalHours = environment["BANGUMI_DATA_SYNC_INTERVAL_HOURS"]?.toLongOrNull()?.coerceAtLeast(1) ?: 6,
+                requestDelayMillis = environment["BANGUMI_DATA_REQUEST_DELAY_MS"]?.toLongOrNull()?.coerceAtLeast(0) ?: 250,
+                archiveLatestUrl = environment["BANGUMI_DATA_ARCHIVE_LATEST_URL"]?.takeIf(String::isNotBlank)
+                    ?: "https://raw.githubusercontent.com/bangumi/Archive/master/aux/latest.json",
+                dataDirectory = environment["BANGUMI_DATA_DIRECTORY"]?.takeIf(String::isNotBlank) ?: "data",
             )
         }
     }

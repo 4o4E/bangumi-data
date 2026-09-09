@@ -47,8 +47,42 @@ Bangumi v0 API ──┘              └───────> 稳定查询 API
 | `BANGUMI_DATA_DATABASE_URL` | 是 | PostgreSQL JDBC URL |
 | `BANGUMI_DATA_DATABASE_USER` | 是 | PostgreSQL 用户名 |
 | `BANGUMI_DATA_DATABASE_PASSWORD` | 是 | PostgreSQL 密码 |
+| `BANGUMI_DATA_SYNC_ENABLED` | 否 | 默认 `true`，是否运行进程内采集调度 |
+| `BANGUMI_DATA_SYNC_INTERVAL_HOURS` | 否 | 默认每 6 小时检查 Archive 新版本 |
+| `BANGUMI_DATA_REQUEST_DELAY_MS` | 否 | Bangumi v0 详情请求的最小间隔，默认 250ms |
+| `BANGUMI_DATA_DIRECTORY` | 否 | 下载临时目录，默认 `data` |
+| `BANGUMI_DATA_SYNC_ENABLED` | 否 | 默认 `true`，在同一后端内启用定时同步 |
+| `BANGUMI_DATA_SYNC_INTERVAL_HOURS` | 否 | 默认每 6 小时检查 Archive 版本 |
+| `BANGUMI_DATA_REQUEST_DELAY_MS` | 否 | Bangumi v0 请求间隔，默认 250ms |
+| `BANGUMI_DATA_DIRECTORY` | 否 | Archive 临时下载目录，默认 `data` |
 
 `GET /health` 不返回业务数据，保留为免鉴权的容器健康检查；其他接口必须发送 `Authorization: Bearer <token>`。
+
+## 数据同步
+
+服务首次启动后会在后台读取官方 Archive：只导入动画、游戏、角色和完整作品—角色关系，过滤 NSFW、儿童向及缺少中文作品名的条目。熟悉度由每部作品内角色 `collects` 的 log 分布、三段自然聚类和边界相近值计算，不使用固定作品名单，也不直接按主角/配角截断。最终候选再通过 Bangumi v0 补齐性别、中文名、别名和图片。
+
+可用带 token 的管理接口立即触发检查或强制重建：
+
+```text
+POST /api/v1/admin/sync
+POST /api/v1/admin/sync?force=true
+```
+
+查询接口：
+
+```text
+GET /api/v1/catalog/status
+GET /api/v1/catalog/characters?gender=FEMALE&tiers=CORE,FAMILIAR&offset=0&limit=500
+GET /openapi.yaml
+```
+
+当前接口：
+
+- `GET /openapi.yaml`：OpenAPI 3.1 契约。
+- `GET /api/v1/catalog/status`：活动数据代、来源版本和同步状态。
+- `GET /api/v1/catalog/characters`：按性别和熟悉度分页获取完整角色卡片数据。
+- `POST /api/v1/admin/sync`：手动触发后台同步，可选 `force=true`。
 
 ## 构建
 

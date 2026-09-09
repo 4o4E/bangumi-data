@@ -1,0 +1,40 @@
+openapi: 3.1.0
+info:
+  title: bangumi-data API
+  version: 1.0.0
+servers:
+  - url: /api/v1
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+paths:
+  /service:
+    get:
+      security: [{ bearerAuth: [] }]
+      responses:
+        "200": { description: 服务与契约版本 }
+  /catalog/status:
+    get:
+      security: [{ bearerAuth: [] }]
+      responses:
+        "200": { description: 当前目录代与同步状态 }
+  /catalog/characters:
+    get:
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - { name: gender, in: query, schema: { type: string, enum: [FEMALE, MALE] } }
+        - { name: tiers, in: query, schema: { type: string }, description: 逗号分隔的熟悉度层级 }
+        - { name: offset, in: query, schema: { type: integer, minimum: 0, default: 0 } }
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 1000, default: 500 } }
+      responses:
+        "200": { description: 角色目录分页结果 }
+  /admin/sync:
+    post:
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - { name: force, in: query, schema: { type: boolean, default: false } }
+      responses:
+        "202": { description: 已启动后台同步 }
+        "409": { description: 已有同步运行 }

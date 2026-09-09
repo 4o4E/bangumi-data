@@ -4,7 +4,11 @@ plugins {
 }
 
 group = "top.e404.bangumi"
-version = "0.1.0-SNAPSHOT"
+version = providers.environmentVariable("GITHUB_REF_NAME")
+    .zip(providers.environmentVariable("GITHUB_REF_TYPE")) { name, type ->
+        if (type == "tag") name.removePrefix("v") else "0.1.0-SNAPSHOT"
+    }
+    .getOrElse("0.1.0-SNAPSHOT")
 
 subprojects {
     group = rootProject.group
