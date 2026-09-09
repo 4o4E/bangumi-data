@@ -10,7 +10,7 @@ import kotlin.test.assertTrue
 class BangumiApiLiveTest {
     @Test
     fun `读取真实角色与作品详情`() {
-        if (System.getenv("BANGUMI_LIVE_TEST") != "true") return
+        if (!liveTestEnabled("BANGUMI_LIVE_TEST", "bangumi.liveTest")) return
         BangumiApiClient(0).use { client ->
             kotlinx.coroutines.runBlocking {
                 val character = assertNotNull(client.character(3))
@@ -20,8 +20,16 @@ class BangumiApiLiveTest {
                 assertTrue(assertNotNull(client.subject(8)).imageUrl?.startsWith("https://") == true)
             }
         }
+    }
+
+    @Test
+    fun `读取真实 Archive 元数据`() {
+        if (!liveTestEnabled("BANGUMI_ARCHIVE_LIVE_TEST", "bangumi.archiveLiveTest")) return
         val release = ArchiveClient("https://raw.githubusercontent.com/bangumi/Archive/master/aux/latest.json").latest()
         assertTrue(release.name.endsWith(".zip"))
         assertTrue(release.digest.startsWith("sha256:"))
     }
 }
+
+private fun liveTestEnabled(environment: String, property: String): Boolean =
+    System.getenv(environment) == "true" || System.getProperty(property) == "true"

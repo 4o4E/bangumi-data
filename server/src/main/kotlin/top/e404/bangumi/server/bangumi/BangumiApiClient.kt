@@ -1,21 +1,10 @@
 package top.e404.bangumi.server.bangumi
 
-import io.ktor.client.HttpClient
-import io.ktor.client.call.body
-import io.ktor.client.engine.cio.CIO
-import io.ktor.client.engine.ProxyBuilder
-import io.ktor.client.plugins.contentnegotiation.ContentNegotiation
-import io.ktor.client.plugins.HttpTimeout
-import io.ktor.client.request.get
-import io.ktor.client.request.header
-import io.ktor.client.statement.bodyAsText
-import io.ktor.http.HttpHeaders
-import io.ktor.http.HttpStatusCode
-import io.ktor.http.Url
-import io.ktor.serialization.kotlinx.json.json
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.Dispatchers
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
@@ -25,7 +14,12 @@ import kotlinx.serialization.json.jsonPrimitive
 import top.e404.bangumi.api.CharacterGender
 import top.e404.bangumi.server.catalog.CharacterEnrichment
 import top.e404.bangumi.server.catalog.SubjectEnrichment
+import top.e404.bangumi.server.net.httpProxyUrl
+import top.e404.bangumi.server.net.openHttpConnection
+import top.e404.bangumi.server.net.toHttpProxy
 import java.io.IOException
+import java.net.HttpURLConnection
+import java.net.URI
 
 interface CatalogEnricher : AutoCloseable {
     suspend fun character(id: Long): CharacterEnrichment?
@@ -35,26 +29,16 @@ interface CatalogEnricher : AutoCloseable {
 
 class BangumiApiClient(
     private val requestDelayMillis: Long,
-    proxyUrl: String? = System.getenv("HTTPS_PROXY") ?: System.getenv("HTTP_PROXY"),
+    proxyUrl: String? = httpProxyUrl(),
+    private val apiBaseUrl: String = "https://api.bgm.tv/v0",
 ) : CatalogEnricher {
     private val jsonCodec = Json { ignoreUnknownKeys = true }
-    private val http = HttpClient(CIO) {
-        engine {
-            proxy = proxyUrl?.takeIf(String::isNotBlank)?.let { ProxyBuilder.http(Url(it)) }
-        }
-        expectSuccess = false
-        install(ContentNegotiation) { json(jsonCodec) }
-        install(HttpTimeout) {
-            connectTimeoutMillis = 10_000
-            requestTimeoutMillis = 30_000
-            socketTimeoutMillis = 30_000
-        }
-    }
+    private val proxy = proxyUrl?.takeIf(String::isNotBlank)?.toHttpProxy()
     private val mutex = Mutex()
     private var lastRequestAt = 0L
 
     override suspend fun character(id: Long): CharacterEnrichment? {
-        val root = request("https://api.bgm.tv/v0/characters/$id") ?: return null
+        val root = request("$apiBaseUrl/characters/$id") ?: return null
         val infobox = root["infobox"] as? JsonArray ?: JsonArray(emptyList())
         val values = infobox.mapNotNull { item ->
             val obj = item as? JsonObject ?: return@mapNotNull null
@@ -82,7 +66,7 @@ class BangumiApiClient(
     }
 
     override suspend fun subject(id: Long): SubjectEnrichment? {
-        val root = request("https://api.bgm.tv/v0/subjects/$id") ?: return null
+        val root = request("$apiBaseUrl/subjects/$id") ?: return null
         return SubjectEnrichment(id, root.string("name_cn")?.trim()?.takeIf(String::isNotEmpty), root.imageUrl())
     }
 
@@ -92,10 +76,7 @@ class BangumiApiClient(
         try {
             repeat(3) { attempt ->
                 val response = try {
-                    http.get(url) {
-                        header(HttpHeaders.UserAgent, USER_AGENT)
-                        header(HttpHeaders.Accept, "application/json")
-                    }
+                    withContext(Dispatchers.IO) { execute(url) }
                 } catch (error: IOException) {
                     if (attempt < 2) {
                         delay(500L * (attempt + 1))
@@ -103,19 +84,16 @@ class BangumiApiClient(
                     }
                     throw error
                 }
-                if (response.status == HttpStatusCode.NotFound) {
-                    response.bodyAsText()
-                    return@withLock null
-                }
-                if (response.status.value in 200..299) return@withLock response.body<JsonObject>()
-                val body = response.bodyAsText().take(500)
-                val retryable = response.status == HttpStatusCode.TooManyRequests || response.status.value >= 500
+                if (response.status == 404) return@withLock null
+                if (response.status in 200..299) return@withLock jsonCodec.decodeFromString<JsonObject>(response.body)
+                val body = response.body.take(500)
+                val retryable = response.status == 429 || response.status >= 500
                 if (retryable && attempt < 2) {
-                    val retryAfterMillis = response.headers[HttpHeaders.RetryAfter]?.toLongOrNull()
+                    val retryAfterMillis = response.retryAfter?.toLongOrNull()
                         ?.coerceIn(1, 60)?.times(1_000) ?: (500L * (attempt + 1))
                     delay(retryAfterMillis)
                 } else {
-                    error("Bangumi API 请求失败: ${response.status.value} $url body=$body")
+                    error("Bangumi API 请求失败: ${response.status} $url body=$body")
                 }
             }
             error("Bangumi API 请求失败: $url")
@@ -124,8 +102,26 @@ class BangumiApiClient(
         }
     }
 
-    override fun close() = http.close()
+    private fun execute(url: String): ApiResponse {
+        val connection = URI(url).toURL().openHttpConnection(proxy)
+        connection.connectTimeout = 10_000
+        connection.readTimeout = 30_000
+        connection.setRequestProperty("User-Agent", USER_AGENT)
+        connection.setRequestProperty("Accept", "application/json")
+        return try {
+            val status = connection.responseCode
+            val stream = if (status >= 400) connection.errorStream else connection.inputStream
+            val body = stream?.bufferedReader(Charsets.UTF_8)?.use { it.readText() }.orEmpty()
+            ApiResponse(status, body, connection.getHeaderField("Retry-After"))
+        } finally {
+            connection.disconnect()
+        }
+    }
+
+    override fun close() = Unit
 }
+
+private data class ApiResponse(val status: Int, val body: String, val retryAfter: String?)
 
 private fun JsonObject.string(key: String) = get(key)?.jsonPrimitive?.contentOrNull
 private fun JsonObject.boolean(key: String) = string(key)?.toBooleanStrictOrNull()

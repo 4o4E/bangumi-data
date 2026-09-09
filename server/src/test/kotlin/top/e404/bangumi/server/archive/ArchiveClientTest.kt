@@ -6,6 +6,7 @@ import java.util.concurrent.atomic.AtomicReference
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertTrue
+import top.e404.bangumi.server.net.httpProxyUrl
 
 class ArchiveClientTest {
     @Test
@@ -40,7 +41,7 @@ class ArchiveClientTest {
     fun `代理环境变量按 HTTPS 和大写优先`() {
         assertEquals(
             "http://https-upper:1",
-            archiveProxyUrl(
+            httpProxyUrl(
                 mapOf(
                     "HTTP_PROXY" to "http://http-upper:4",
                     "http_proxy" to "http://http-lower:3",

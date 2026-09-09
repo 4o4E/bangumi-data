@@ -94,7 +94,7 @@ docker compose pull
 docker compose up -d
 ```
 
-当前固定版本为 `ghcr.io/4o4e/bangumi-data:v0.1.3`；升级时先修改 `docker-compose.yml` 中的镜像标签，再重新执行上述命令。
+当前固定版本为 `ghcr.io/4o4e/bangumi-data:v0.1.4`；升级时先修改 `docker-compose.yml` 中的镜像标签，再重新执行上述命令。
 
 ## 构建
 
@@ -118,13 +118,13 @@ docker build -t bangumi-data:local .
 推送带 `v` 前缀的 SemVer 标签后，GitHub Actions 会运行测试、构建 `linux/amd64` 与 `linux/arm64` 镜像、发布到 GHCR，并创建同名 GitHub Release：
 
 ```powershell
-git tag v0.1.3
-git push origin v0.1.3
+git tag v0.1.4
+git push origin v0.1.4
 ```
 
 发布产物：
 
 ```text
-ghcr.io/4o4e/bangumi-data:v0.1.3
+ghcr.io/4o4e/bangumi-data:v0.1.4
 ghcr.io/4o4e/bangumi-data:latest
 ```
