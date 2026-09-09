@@ -1,0 +1,8 @@
+.git
+.gradle
+.idea
+api-model/build
+http-client/build
+server/build
+data
+.env

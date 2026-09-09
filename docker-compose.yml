@@ -1,0 +1,31 @@
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: bangumi
+      POSTGRES_USER: bangumi
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - bangumi-postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U bangumi -d bangumi"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  bangumi-data:
+    build: .
+    environment:
+      BANGUMI_DATA_TOKEN: ${BANGUMI_DATA_TOKEN}
+      BANGUMI_DATA_DATABASE_URL: jdbc:postgresql://postgres:5432/bangumi
+      BANGUMI_DATA_DATABASE_USER: bangumi
+      BANGUMI_DATA_DATABASE_PASSWORD: ${POSTGRES_PASSWORD}
+    ports:
+      - "8080:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  bangumi-postgres:

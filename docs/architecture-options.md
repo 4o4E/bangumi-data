@@ -1,10 +1,14 @@
-# 架构方案反选表
+# 架构方案反选表（已完成首轮决策）
+
+当前接受：`SCOPE-A + SOURCE-A + PROCESS-B + DB-A + IMPORT-A + API-A + CLIENT-A + SEARCH-A + POP-A + HISTORY-B + IMAGE-A + AUTH-A（环境变量单 token） + RELEASE-A（镜像改为 GHCR）`。
+
+具体解释以 `docs/decisions` 下状态为“已接受”的 ADR 为准。未被当前决策覆盖的候选仍保留，供未来重新评估。
 
 下列每一项可以独立反选。标记“推荐”的组合是一条可直接实施的首版路径，不代表已经决定。回复时可以只写变更项，例如：`DB-C、API-B、SEARCH-B，其余默认`。
 
 ## 默认组合摘要
 
-`SCOPE-A + SOURCE-A + PROCESS-A + DB-A + IMPORT-A + API-A + CLIENT-A + SEARCH-A + POP-A + HISTORY-A + IMAGE-A + AUTH-A + RELEASE-A`
+`SCOPE-A + SOURCE-A + PROCESS-B + DB-A + IMPORT-A + API-A + CLIENT-A + SEARCH-A + POP-A + HISTORY-B + IMAGE-A + AUTH-A + RELEASE-A`
 
 ## 1. 首版数据范围
 

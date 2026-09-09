@@ -6,8 +6,17 @@ plugins {
 group = "top.e404.bangumi"
 version = "0.1.0-SNAPSHOT"
 
-allprojects {
+subprojects {
+    group = rootProject.group
+    version = rootProject.version
+
     repositories {
         mavenCentral()
     }
+}
+
+tasks.register<Sync>("prepareDockerContext") {
+    dependsOn(":server:installDist")
+    from(project(":server").layout.buildDirectory.dir("install/bangumi-data"))
+    into(layout.buildDirectory.dir("docker/app"))
 }

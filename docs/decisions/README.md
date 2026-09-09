@@ -1,6 +1,6 @@
 # 架构决策记录
 
-用户完成 `docs/architecture-options.md` 的反选后，每个确认项写成独立 ADR（Architecture Decision Record，架构决策记录），至少包含：背景、最终选择、放弃方案、兼容性影响和可逆条件。
+每个确认项写成独立 ADR（Architecture Decision Record，架构决策记录），至少包含：背景、最终选择、放弃方案、兼容性影响和可逆条件。
 
 编号示例：
 
