@@ -4,6 +4,8 @@ import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 import java.net.HttpURLConnection
+import java.net.InetSocketAddress
+import java.net.Proxy
 import java.net.URI
 import java.nio.file.Files
 import java.nio.file.Path
@@ -13,7 +15,10 @@ import java.time.Instant
 class ArchiveClient(
     private val latestUrl: String,
     private val json: Json = Json { ignoreUnknownKeys = true },
+    proxyUrl: String? = archiveProxyUrl(),
 ) {
+    private val proxy = proxyUrl?.takeIf(String::isNotBlank)?.toHttpProxy()
+
     fun latest(): ArchiveRelease {
         val dto = json.decodeFromString<LatestDto>(request(latestUrl).decodeToString())
         return ArchiveRelease(dto.name, dto.browserDownloadUrl, dto.digest, Instant.parse(dto.createdAt).toEpochMilli())
@@ -32,7 +37,8 @@ class ArchiveClient(
     private fun request(url: String): ByteArray = requestStream(url).use { it.readBytes() }
 
     private fun requestStream(url: String): java.io.InputStream {
-        val connection = URI(url).toURL().openConnection() as HttpURLConnection
+        val target = URI(url).toURL()
+        val connection = (proxy?.let(target::openConnection) ?: target.openConnection()) as HttpURLConnection
         connection.connectTimeout = 10_000
         connection.readTimeout = 120_000
         connection.setRequestProperty("User-Agent", USER_AGENT)
@@ -48,6 +54,18 @@ class ArchiveClient(
         val digest: String,
         @SerialName("created_at") val createdAt: String,
     )
+}
+
+internal fun archiveProxyUrl(environment: Map<String, String> = System.getenv()): String? =
+    listOf("HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy")
+        .firstNotNullOfOrNull { name -> environment[name]?.takeIf(String::isNotBlank) }
+
+private fun String.toHttpProxy(): Proxy {
+    val uri = URI(this)
+    require(uri.scheme.equals("http", ignoreCase = true)) { "Archive 代理只支持 HTTP URL: $this" }
+    val host = requireNotNull(uri.host) { "Archive 代理缺少主机名: $this" }
+    val port = uri.port.takeIf { it > 0 } ?: 80
+    return Proxy(Proxy.Type.HTTP, InetSocketAddress.createUnresolved(host, port))
 }
 
 private fun sha256(path: Path): String {

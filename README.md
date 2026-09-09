@@ -51,6 +51,7 @@ Bangumi v0 API ──┘              └───────> 稳定查询 API
 | `BANGUMI_DATA_SYNC_INTERVAL_HOURS` | 否 | 默认每 6 小时检查 Archive 新版本 |
 | `BANGUMI_DATA_REQUEST_DELAY_MS` | 否 | Bangumi v0 详情请求的最小间隔，默认 250ms |
 | `BANGUMI_DATA_DIRECTORY` | 否 | 下载临时目录，默认 `data` |
+| `HTTPS_PROXY` / `HTTP_PROXY` | 否 | Archive 下载和 Bangumi v0 请求使用的 HTTP 代理，优先读取 `HTTPS_PROXY` |
 | `BANGUMI_DATA_SYNC_ENABLED` | 否 | 默认 `true`，在同一后端内启用定时同步 |
 | `BANGUMI_DATA_SYNC_INTERVAL_HOURS` | 否 | 默认每 6 小时检查 Archive 版本 |
 | `BANGUMI_DATA_REQUEST_DELAY_MS` | 否 | Bangumi v0 请求间隔，默认 250ms |
@@ -93,7 +94,7 @@ docker compose pull
 docker compose up -d
 ```
 
-当前固定版本为 `ghcr.io/4o4e/bangumi-data:v0.1.2`；升级时先修改 `docker-compose.yml` 中的镜像标签，再重新执行上述命令。
+当前固定版本为 `ghcr.io/4o4e/bangumi-data:v0.1.3`；升级时先修改 `docker-compose.yml` 中的镜像标签，再重新执行上述命令。
 
 ## 构建
 
@@ -117,13 +118,13 @@ docker build -t bangumi-data:local .
 推送带 `v` 前缀的 SemVer 标签后，GitHub Actions 会运行测试、构建 `linux/amd64` 与 `linux/arm64` 镜像、发布到 GHCR，并创建同名 GitHub Release：
 
 ```powershell
-git tag v0.1.2
-git push origin v0.1.2
+git tag v0.1.3
+git push origin v0.1.3
 ```
 
 发布产物：
 
 ```text
-ghcr.io/4o4e/bangumi-data:v0.1.2
+ghcr.io/4o4e/bangumi-data:v0.1.3
 ghcr.io/4o4e/bangumi-data:latest
 ```
