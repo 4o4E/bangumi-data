@@ -250,14 +250,11 @@ class CatalogStore(private val dataSource: DataSource) : CatalogReader {
         }
     }
 
+    /** 调用方必须已持有 [withSyncLock]；这里只用事务保证数据代切换原子提交。 */
     fun activate(generation: String) {
         dataSource.connection.use { connection ->
             connection.autoCommit = false
             try {
-                connection.prepareStatement("SELECT pg_advisory_xact_lock(?)").use {
-                    it.setLong(1, SYNC_LOCK_ID)
-                    it.executeQuery().close()
-                }
                 val eligible = connection.prepareStatement(
                     "SELECT COUNT(*) FROM bangumi_character WHERE generation_id = ? AND eligible = TRUE",
                 ).use { statement ->
