@@ -61,7 +61,7 @@ Bangumi v0 API ──┘              └───────> 稳定查询 API
 
 ## 数据同步
 
-服务首次启动后会在后台读取官方 Archive：只导入动画、游戏、角色和完整作品—角色关系，过滤 NSFW、儿童向及缺少中文作品名的条目。熟悉度由每部作品内角色 `collects` 的 log 分布、三段自然聚类和边界相近值计算，不使用固定作品名单，也不直接按主角/配角截断。最终候选再通过 Bangumi v0 补齐性别、中文名、别名和图片。
+服务首次启动后会在后台读取官方 Archive：只导入动画、游戏、角色和完整作品—角色关系，过滤 NSFW、儿童向及缺少中文作品名的条目。熟悉度由每部作品内角色 `collects` 的 log 分布、三段自然聚类和边界相近值计算，不使用固定作品名单，也不直接按主角/配角截断。最终候选再通过 Bangumi v0 补齐性别、中文名、别名和图片。Archive 基线与详情补充均按批提交，并通过来源摘要和 `enriched` 状态断点续采；首次同步得到第一批有效角色后即可查询，作品信息会继续在后台逐批完善。
 
 可用带 token 的管理接口立即触发检查或强制重建：
 
@@ -94,7 +94,7 @@ docker compose pull
 docker compose up -d
 ```
 
-当前固定版本为 `ghcr.io/4o4e/bangumi-data:v0.1.4`；升级时先修改 `docker-compose.yml` 中的镜像标签，再重新执行上述命令。
+当前固定版本为 `ghcr.io/4o4e/bangumi-data:v0.1.6`；升级时先修改 `docker-compose.yml` 中的镜像标签，再重新执行上述命令。
 
 ## 构建
 
@@ -118,13 +118,13 @@ docker build -t bangumi-data:local .
 推送带 `v` 前缀的 SemVer 标签后，GitHub Actions 会运行测试、构建 `linux/amd64` 与 `linux/arm64` 镜像、发布到 GHCR，并创建同名 GitHub Release：
 
 ```powershell
-git tag v0.1.4
-git push origin v0.1.4
+git tag v0.1.6
+git push origin v0.1.6
 ```
 
 发布产物：
 
 ```text
-ghcr.io/4o4e/bangumi-data:v0.1.4
+ghcr.io/4o4e/bangumi-data:v0.1.6
 ghcr.io/4o4e/bangumi-data:latest
 ```

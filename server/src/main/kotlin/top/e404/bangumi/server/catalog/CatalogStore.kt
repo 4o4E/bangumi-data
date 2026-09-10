@@ -34,29 +34,64 @@ data class CharacterEnrichment(
 data class SubjectEnrichment(val id: Long, val name: String?, val imageUrl: String?)
 
 class CatalogStore(private val dataSource: DataSource) : CatalogReader {
-    fun beginGeneration(id: String, sourceVersion: String, digest: String, sourceCreatedAt: Long) {
+    /** 返回 true 表示同一来源数据代已完成 Archive 导入，可直接从未补充记录继续。 */
+    fun beginGeneration(id: String, sourceVersion: String, digest: String, sourceCreatedAt: Long, reset: Boolean = false): Boolean {
         dataSource.connection.use { connection ->
-            connection.prepareStatement(
-                """
-                INSERT INTO bangumi_catalog_generation(id, source_version, source_digest, source_created_at, status, created_at)
-                VALUES (?, ?, ?, ?, 'IMPORTING', ?)
-                ON CONFLICT(id) DO UPDATE SET status = 'IMPORTING', error = NULL
-                """.trimIndent(),
-            ).use { statement ->
-                statement.setString(1, id)
-                statement.setString(2, sourceVersion)
-                statement.setString(3, digest)
-                statement.setLong(4, sourceCreatedAt)
-                statement.setLong(5, System.currentTimeMillis())
-                statement.executeUpdate()
-            }
-            connection.prepareStatement("DELETE FROM bangumi_subject WHERE generation_id = ?").use {
-                it.setString(1, id)
-                it.executeUpdate()
-            }
-            connection.prepareStatement("DELETE FROM bangumi_character WHERE generation_id = ?").use {
-                it.setString(1, id)
-                it.executeUpdate()
+            connection.autoCommit = false
+            try {
+                val existing = connection.prepareStatement(
+                    "SELECT source_digest, archive_imported FROM bangumi_catalog_generation WHERE id = ?",
+                ).use { statement ->
+                    statement.setString(1, id)
+                    statement.executeQuery().use { result ->
+                        if (result.next()) result.getString(1) to result.getBoolean(2) else null
+                    }
+                }
+                val sameSource = !reset && existing?.first == digest
+                val archiveImported = sameSource && existing?.second == true
+                connection.prepareStatement(
+                    """
+                    INSERT INTO bangumi_catalog_generation(id, source_version, source_digest, source_created_at, status, created_at)
+                    VALUES (?, ?, ?, ?, 'IMPORTING', ?)
+                    ON CONFLICT(id) DO UPDATE SET source_version = EXCLUDED.source_version,
+                        source_digest = EXCLUDED.source_digest, source_created_at = EXCLUDED.source_created_at, error = NULL
+                    """.trimIndent(),
+                ).use { statement ->
+                    statement.setString(1, id)
+                    statement.setString(2, sourceVersion)
+                    statement.setString(3, digest)
+                    statement.setLong(4, sourceCreatedAt)
+                    statement.setLong(5, System.currentTimeMillis())
+                    statement.executeUpdate()
+                }
+                if (sameSource) {
+                    connection.prepareStatement(
+                        """
+                        UPDATE bangumi_catalog_generation generation
+                        SET status = CASE WHEN EXISTS (
+                            SELECT 1 FROM bangumi_catalog_state state WHERE state.active_generation_id = generation.id
+                        ) THEN 'ACTIVE' ELSE 'IMPORTING' END
+                        WHERE id = ?
+                        """.trimIndent(),
+                    ).use { it.setString(1, id); it.executeUpdate() }
+                } else {
+                    connection.prepareStatement("DELETE FROM bangumi_subject WHERE generation_id = ?").use {
+                        it.setString(1, id); it.executeUpdate()
+                    }
+                    connection.prepareStatement("DELETE FROM bangumi_character WHERE generation_id = ?").use {
+                        it.setString(1, id); it.executeUpdate()
+                    }
+                    connection.prepareStatement(
+                        "UPDATE bangumi_catalog_generation SET status = 'IMPORTING', archive_imported = FALSE WHERE id = ?",
+                    ).use { it.setString(1, id); it.executeUpdate() }
+                }
+                connection.commit()
+                return archiveImported
+            } catch (error: Throwable) {
+                connection.rollback()
+                throw error
+            } finally {
+                connection.autoCommit = true
             }
         }
     }
@@ -80,7 +115,13 @@ class CatalogStore(private val dataSource: DataSource) : CatalogReader {
     fun failGeneration(generation: String?, error: Throwable) {
         dataSource.connection.use { connection ->
             if (generation != null) connection.prepareStatement(
-                "UPDATE bangumi_catalog_generation SET status = 'FAILED', error = ? WHERE id = ?",
+                """
+                UPDATE bangumi_catalog_generation generation
+                SET status = CASE WHEN EXISTS (
+                    SELECT 1 FROM bangumi_catalog_state state WHERE state.active_generation_id = generation.id
+                ) THEN 'ACTIVE' ELSE 'FAILED' END, error = ?
+                WHERE id = ?
+                """.trimIndent(),
             ).use { it.setString(1, error.message); it.setString(2, generation); it.executeUpdate() }
         }
         updateSyncState(false, null, error.stackTraceToString().take(8_000))
@@ -106,6 +147,9 @@ class CatalogStore(private val dataSource: DataSource) : CatalogReader {
                     WHERE sc.generation_id = c.generation_id AND sc.character_id = c.id
                 )
                 """.trimIndent(),
+            ).use { it.setString(1, generation); it.executeUpdate() }
+            connection.prepareStatement(
+                "UPDATE bangumi_catalog_generation SET archive_imported = TRUE WHERE id = ?",
             ).use { it.setString(1, generation); it.executeUpdate() }
             connection.commit()
             ArchiveImportSummary(subjectCount, characterCount, relationCount)
@@ -186,6 +230,30 @@ class CatalogStore(private val dataSource: DataSource) : CatalogReader {
         }
     }
 
+    fun hasPopularity(generation: String): Boolean = dataSource.connection.use { connection ->
+        connection.prepareStatement(
+            "SELECT EXISTS(SELECT 1 FROM bangumi_subject_character WHERE generation_id = ? AND familiarity IN ('CORE', 'FAMILIAR'))",
+        ).use { statement ->
+            statement.setString(1, generation)
+            statement.executeQuery().use { it.next(); it.getBoolean(1) }
+        }
+    }
+
+    fun pendingCharacterIds(generation: String, limit: Int): List<Long> = dataSource.connection.use { connection ->
+        connection.prepareStatement(
+            """
+            SELECT DISTINCT sc.character_id
+            FROM bangumi_subject_character sc
+            JOIN bangumi_character c ON c.generation_id = sc.generation_id AND c.id = sc.character_id
+            WHERE sc.generation_id = ? AND sc.familiarity IN ('CORE', 'FAMILIAR') AND c.enriched = FALSE
+            ORDER BY sc.character_id LIMIT ?
+            """.trimIndent(),
+        ).use { statement ->
+            statement.setString(1, generation); statement.setInt(2, limit)
+            statement.executeQuery().use { result -> buildList { while (result.next()) add(result.getLong(1)) } }
+        }
+    }
+
     fun selectedSubjectIds(generation: String): List<Long> = dataSource.connection.use { connection ->
         connection.prepareStatement(
             """
@@ -211,47 +279,98 @@ class CatalogStore(private val dataSource: DataSource) : CatalogReader {
         }
     }
 
-    fun saveCharacterEnrichment(generation: String, value: CharacterEnrichment) {
+    fun pendingEligibleSubjectIds(generation: String, limit: Int): List<Long> = dataSource.connection.use { connection ->
+        connection.prepareStatement(
+            """
+            SELECT DISTINCT sc.subject_id
+            FROM bangumi_subject_character sc
+            JOIN bangumi_character c ON c.generation_id = sc.generation_id AND c.id = sc.character_id
+            JOIN bangumi_subject s ON s.generation_id = sc.generation_id AND s.id = sc.subject_id
+            WHERE sc.generation_id = ? AND sc.familiarity IN ('CORE', 'FAMILIAR')
+              AND c.eligible = TRUE AND s.enriched = FALSE
+            ORDER BY sc.subject_id LIMIT ?
+            """.trimIndent(),
+        ).use { statement ->
+            statement.setString(1, generation); statement.setInt(2, limit)
+            statement.executeQuery().use { result -> buildList { while (result.next()) add(result.getLong(1)) } }
+        }
+    }
+
+    fun saveCharacterEnrichment(generation: String, value: CharacterEnrichment) =
+        saveCharacterEnrichments(generation, listOf(value))
+
+    fun saveCharacterEnrichments(generation: String, values: List<CharacterEnrichment>) {
+        if (values.isEmpty()) return
         dataSource.connection.use { connection ->
-            connection.prepareStatement(
-                """
-                UPDATE bangumi_character SET name_cn = ?, aliases = ?, gender = ?, summary = ?, image_url = ?,
-                    nsfw = ?, eligible = ?, enriched = TRUE, source_updated_at = ?
-                WHERE generation_id = ? AND id = ?
-                """.trimIndent(),
-            ).use { statement ->
-                statement.setString(1, value.name)
-                statement.setArray(2, connection.createArrayOf("text", value.aliases.toTypedArray()))
-                statement.setString(3, value.gender?.name)
-                statement.setString(4, value.description)
-                statement.setString(5, value.imageUrl)
-                statement.setBoolean(6, value.nsfw)
-                statement.setBoolean(7, !value.nsfw && value.gender != null && value.name.isNotBlank() && value.imageUrl != null)
-                statement.setLong(8, System.currentTimeMillis())
-                statement.setString(9, generation)
-                statement.setLong(10, value.id)
-                statement.executeUpdate()
+            connection.autoCommit = false
+            try {
+                connection.prepareStatement(
+                    """
+                    UPDATE bangumi_character SET name_cn = ?, aliases = ?, gender = ?, summary = ?, image_url = ?,
+                        nsfw = ?, eligible = ?, enriched = TRUE, source_updated_at = ?
+                    WHERE generation_id = ? AND id = ?
+                    """.trimIndent(),
+                ).use { statement ->
+                    val updatedAt = System.currentTimeMillis()
+                    values.forEach { value ->
+                        statement.setString(1, value.name)
+                        statement.setArray(2, connection.createArrayOf("text", value.aliases.toTypedArray()))
+                        statement.setString(3, value.gender?.name)
+                        statement.setString(4, value.description)
+                        statement.setString(5, value.imageUrl)
+                        statement.setBoolean(6, value.nsfw)
+                        statement.setBoolean(7, !value.nsfw && value.gender != null && value.name.isNotBlank() && value.imageUrl != null)
+                        statement.setLong(8, updatedAt)
+                        statement.setString(9, generation)
+                        statement.setLong(10, value.id)
+                        statement.addBatch()
+                    }
+                    statement.executeBatch()
+                }
+                connection.commit()
+            } catch (error: Throwable) {
+                connection.rollback()
+                throw error
+            } finally {
+                connection.autoCommit = true
             }
         }
     }
 
-    fun saveSubjectEnrichment(generation: String, value: SubjectEnrichment) {
+    fun saveSubjectEnrichment(generation: String, value: SubjectEnrichment) =
+        saveSubjectEnrichments(generation, listOf(value))
+
+    fun saveSubjectEnrichments(generation: String, values: List<SubjectEnrichment>) {
+        if (values.isEmpty()) return
         dataSource.connection.use { connection ->
-            connection.prepareStatement(
-                "UPDATE bangumi_subject SET name_cn = COALESCE(NULLIF(?, ''), name_cn), image_url = ?, source_updated_at = ? WHERE generation_id = ? AND id = ?",
-            ).use { statement ->
-                statement.setString(1, value.name)
-                statement.setString(2, value.imageUrl)
-                statement.setLong(3, System.currentTimeMillis())
-                statement.setString(4, generation)
-                statement.setLong(5, value.id)
-                statement.executeUpdate()
+            connection.autoCommit = false
+            try {
+                connection.prepareStatement(
+                    "UPDATE bangumi_subject SET name_cn = COALESCE(NULLIF(?, ''), name_cn), image_url = ?, enriched = TRUE, source_updated_at = ? WHERE generation_id = ? AND id = ?",
+                ).use { statement ->
+                    val updatedAt = System.currentTimeMillis()
+                    values.forEach { value ->
+                        statement.setString(1, value.name)
+                        statement.setString(2, value.imageUrl)
+                        statement.setLong(3, updatedAt)
+                        statement.setString(4, generation)
+                        statement.setLong(5, value.id)
+                        statement.addBatch()
+                    }
+                    statement.executeBatch()
+                }
+                connection.commit()
+            } catch (error: Throwable) {
+                connection.rollback()
+                throw error
+            } finally {
+                connection.autoCommit = true
             }
         }
     }
 
     /** 调用方必须已持有 [withSyncLock]；这里只用事务保证数据代切换原子提交。 */
-    fun activate(generation: String) {
+    fun activate(generation: String, syncComplete: Boolean = true) {
         dataSource.connection.use { connection ->
             connection.autoCommit = false
             try {
@@ -265,9 +384,12 @@ class CatalogStore(private val dataSource: DataSource) : CatalogReader {
                 connection.prepareStatement(
                     "UPDATE bangumi_catalog_generation SET status = 'ACTIVE', activated_at = ? WHERE id = ?",
                 ).use { it.setLong(1, System.currentTimeMillis()); it.setString(2, generation); it.executeUpdate() }
-                connection.prepareStatement(
-                    "UPDATE bangumi_catalog_state SET active_generation_id = ?, sync_running = FALSE, sync_phase = NULL, last_error = NULL WHERE singleton = TRUE",
-                ).use { it.setString(1, generation); it.executeUpdate() }
+                val stateSql = if (syncComplete) {
+                    "UPDATE bangumi_catalog_state SET active_generation_id = ?, sync_running = FALSE, sync_phase = NULL, last_error = NULL WHERE singleton = TRUE"
+                } else {
+                    "UPDATE bangumi_catalog_state SET active_generation_id = ?, last_error = NULL WHERE singleton = TRUE"
+                }
+                connection.prepareStatement(stateSql).use { it.setString(1, generation); it.executeUpdate() }
                 connection.prepareStatement("DELETE FROM bangumi_catalog_generation WHERE id <> ?").use {
                     it.setString(1, generation)
                     it.executeUpdate()
@@ -356,7 +478,7 @@ class CatalogStore(private val dataSource: DataSource) : CatalogReader {
     private fun importSubjects(connection: Connection, generation: String, values: Sequence<ArchiveSubject>, sourceTime: Long): Long {
         var count = 0L
         connection.prepareStatement(
-            "INSERT INTO bangumi_subject(generation_id,id,type,name,name_cn,summary,image_url,nsfw,source_updated_at) VALUES (?,?,?,?,?,?,NULL,?,?)",
+            "INSERT INTO bangumi_subject(generation_id,id,type,name,name_cn,summary,image_url,nsfw,source_updated_at) VALUES (?,?,?,?,?,?,NULL,?,?) ON CONFLICT (generation_id,id) DO NOTHING",
         ).use { statement ->
             values.filter { it.type in setOf(2, 4) && !it.nsfw && !it.childOriented() }.forEach { value ->
                 val nameCn = value.nameCn.trim().ifBlank { value.name.takeIf(String::containsHan).orEmpty() }
@@ -364,9 +486,13 @@ class CatalogStore(private val dataSource: DataSource) : CatalogReader {
                 statement.setString(1, generation); statement.setLong(2, value.id); statement.setInt(3, value.type)
                 statement.setString(4, value.name); statement.setString(5, nameCn); statement.setString(6, value.summary)
                 statement.setBoolean(7, value.nsfw); statement.setLong(8, sourceTime); statement.addBatch(); count++
-                if (count % BATCH_SIZE == 0L) statement.executeBatch()
+                if (count % BATCH_SIZE == 0L) {
+                    statement.executeBatch()
+                    connection.commit()
+                }
             }
             statement.executeBatch()
+            connection.commit()
         }
         return count
     }
@@ -374,15 +500,19 @@ class CatalogStore(private val dataSource: DataSource) : CatalogReader {
     private fun importCharacters(connection: Connection, generation: String, values: Sequence<ArchiveCharacter>, sourceTime: Long): Long {
         var count = 0L
         connection.prepareStatement(
-            "INSERT INTO bangumi_character(generation_id,id,entity_type,name,summary,comments,collects,source_updated_at) VALUES (?,?,?,?,?,?,?,?)",
+            "INSERT INTO bangumi_character(generation_id,id,entity_type,name,summary,comments,collects,source_updated_at) VALUES (?,?,?,?,?,?,?,?) ON CONFLICT (generation_id,id) DO NOTHING",
         ).use { statement ->
             values.filter { it.role == 1 }.forEach { value ->
                 statement.setString(1, generation); statement.setLong(2, value.id); statement.setInt(3, value.role)
                 statement.setString(4, value.name); statement.setString(5, value.summary); statement.setLong(6, value.comments)
                 statement.setLong(7, value.collects); statement.setLong(8, sourceTime); statement.addBatch(); count++
-                if (count % BATCH_SIZE == 0L) statement.executeBatch()
+                if (count % BATCH_SIZE == 0L) {
+                    statement.executeBatch()
+                    connection.commit()
+                }
             }
             statement.executeBatch()
+            connection.commit()
         }
         return count
     }
@@ -401,9 +531,13 @@ class CatalogStore(private val dataSource: DataSource) : CatalogReader {
                 statement.setInt(4, value.type); statement.setInt(5, value.order); statement.setString(6, generation)
                 statement.setLong(7, value.subjectId); statement.setString(8, generation); statement.setLong(9, value.characterId)
                 statement.addBatch(); attempted++
-                if (attempted % BATCH_SIZE == 0L) statement.executeBatch()
+                if (attempted % BATCH_SIZE == 0L) {
+                    statement.executeBatch()
+                    connection.commit()
+                }
             }
             statement.executeBatch()
+            connection.commit()
         }
         return connection.prepareStatement(
             "SELECT COUNT(*) FROM bangumi_subject_character WHERE generation_id = ?",

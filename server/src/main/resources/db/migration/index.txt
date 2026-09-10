@@ -1,1 +1,2 @@
 V001__catalog.sql
+V002__resumable_enrichment.sql
