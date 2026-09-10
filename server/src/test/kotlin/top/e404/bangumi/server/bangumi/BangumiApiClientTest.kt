@@ -20,8 +20,10 @@ class BangumiApiClientTest {
                 val response = when {
                     target.contains("/characters/3") ->
                         """{"name":"测试角色","gender":"female","summary":"这是一段足够长的中文角色简介内容","images":{"large":"https://example.com/character.jpg"}}"""
+                    target.contains("/characters/4") ->
+                        """{"name":"Original Name","gender":"female","images":{"large":"https://example.com/original-name.jpg"}}"""
                     target.contains("/subjects/8") ->
-                        """{"name_cn":"测试作品","images":{"large":"https://example.com/subject.jpg"}}"""
+                        """{"name_cn":"测试作品","nsfw":true,"images":{"large":"https://example.com/subject.jpg"}}"""
                     else -> error("未预期的请求: $target")
                 }.encodeToByteArray()
                 exchange.sendResponseHeaders(200, response.size.toLong())
@@ -40,7 +42,10 @@ class BangumiApiClientTest {
                     val character = requireNotNull(client.character(3))
                     assertEquals("测试角色", character.name)
                     assertEquals(CharacterGender.FEMALE, character.gender)
-                    assertEquals("测试作品", requireNotNull(client.subject(8)).name)
+                    assertEquals("Original Name", requireNotNull(client.character(4)).name)
+                    val subject = requireNotNull(client.subject(8))
+                    assertEquals("测试作品", subject.name)
+                    assertEquals(true, subject.nsfw)
                 }
             }
             assertTrue(requests.any { it.contains("api.invalid/v0/characters/3") })

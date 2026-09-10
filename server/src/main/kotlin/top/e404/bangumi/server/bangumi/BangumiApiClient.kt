@@ -47,7 +47,7 @@ class BangumiApiClient(
         }.toMap()
         val original = root.string("name").orEmpty().trim()
         val name = CHINESE_KEYS.asSequence().flatMap { values[it].orEmpty() }.map(String::trim)
-            .firstOrNull(String::isNotEmpty) ?: original.takeIf { it.containsHan() && !it.containsKana() }.orEmpty()
+            .firstOrNull(String::isNotEmpty) ?: original
         val aliases = buildList {
             add(original)
             CHINESE_KEYS.forEach { addAll(values[it].orEmpty()) }
@@ -67,7 +67,12 @@ class BangumiApiClient(
 
     override suspend fun subject(id: Long): SubjectEnrichment? {
         val root = request("$apiBaseUrl/subjects/$id") ?: return null
-        return SubjectEnrichment(id, root.string("name_cn")?.trim()?.takeIf(String::isNotEmpty), root.imageUrl())
+        return SubjectEnrichment(
+            id,
+            root.string("name_cn")?.trim()?.takeIf(String::isNotEmpty),
+            root.imageUrl(),
+            root.boolean("nsfw"),
+        )
     }
 
     private suspend fun request(url: String): JsonObject? = mutex.withLock {
@@ -144,7 +149,5 @@ private fun String?.toChineseDescription(): String? {
     val kana = text.codePoints().filter { Character.UnicodeScript.of(it) in setOf(Character.UnicodeScript.HIRAGANA, Character.UnicodeScript.KATAKANA) }.count()
     return text.takeIf { han >= 8 && kana <= maxOf(3, han / 5) }
 }
-private fun String.containsHan() = codePoints().anyMatch { Character.UnicodeScript.of(it) == Character.UnicodeScript.HAN }
-private fun String.containsKana() = codePoints().anyMatch { Character.UnicodeScript.of(it) in setOf(Character.UnicodeScript.HIRAGANA, Character.UnicodeScript.KATAKANA) }
 private val CHINESE_KEYS = listOf("简体中文名", "中文名", "第二中文名")
 private const val USER_AGENT = "e404/bangumi-data (https://github.com/4o4E/bangumi-data)"

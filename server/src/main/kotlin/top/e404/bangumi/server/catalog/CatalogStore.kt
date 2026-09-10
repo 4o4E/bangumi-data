@@ -16,6 +16,7 @@ import top.e404.bangumi.server.archive.ArchiveSubject
 import top.e404.bangumi.server.archive.ArchiveSubjectCharacter
 import java.sql.Connection
 import java.sql.ResultSet
+import java.sql.Types
 import javax.sql.DataSource
 
 interface CatalogReader {
@@ -39,7 +40,7 @@ data class CharacterEnrichment(
     val nsfw: Boolean,
 )
 
-data class SubjectEnrichment(val id: Long, val name: String?, val imageUrl: String?)
+data class SubjectEnrichment(val id: Long, val name: String?, val imageUrl: String?, val nsfw: Boolean? = null)
 
 class CatalogStore(private val dataSource: DataSource) : CatalogReader {
     /** 返回 true 表示同一来源数据代已完成 Archive 导入，可直接从未补充记录继续。 */
@@ -398,15 +399,26 @@ class CatalogStore(private val dataSource: DataSource) : CatalogReader {
             connection.autoCommit = false
             try {
                 connection.prepareStatement(
-                    "UPDATE bangumi_subject SET name_cn = COALESCE(NULLIF(?, ''), name_cn), image_url = ?, enriched = TRUE, source_updated_at = ? WHERE generation_id = ? AND id = ?",
+                    """
+                    UPDATE bangumi_subject
+                    SET name_cn = COALESCE(NULLIF(?, ''), name_cn),
+                        nsfw = COALESCE(?, nsfw),
+                        -- Bangumi 只有条目级 NSFW 标记，没有图片级审核结果；已标记条目不得下发封面。
+                        image_url = CASE WHEN COALESCE(?, nsfw) THEN NULL ELSE ? END,
+                        enriched = TRUE,
+                        source_updated_at = ?
+                    WHERE generation_id = ? AND id = ?
+                    """.trimIndent(),
                 ).use { statement ->
                     val updatedAt = System.currentTimeMillis()
                     values.forEach { value ->
                         statement.setString(1, value.name)
-                        statement.setString(2, value.imageUrl)
-                        statement.setLong(3, updatedAt)
-                        statement.setString(4, generation)
-                        statement.setLong(5, value.id)
+                        statement.setObject(2, value.nsfw, Types.BOOLEAN)
+                        statement.setObject(3, value.nsfw, Types.BOOLEAN)
+                        statement.setString(4, value.imageUrl)
+                        statement.setLong(5, updatedAt)
+                        statement.setString(6, generation)
+                        statement.setLong(7, value.id)
                         statement.addBatch()
                     }
                     statement.executeBatch()
@@ -654,18 +666,30 @@ class CatalogStore(private val dataSource: DataSource) : CatalogReader {
                 favorite_wish,favorite_done,favorite_doing,favorite_on_hold,favorite_dropped,source_updated_at
             ) VALUES (?,?,?,?,?,?,NULL,?,?,?,?,?,?,?)
             ON CONFLICT (generation_id,id) DO UPDATE SET
+                type=EXCLUDED.type,
+                name=EXCLUDED.name,
+                name_cn=EXCLUDED.name_cn,
+                summary=EXCLUDED.summary,
+                image_url=CASE WHEN EXCLUDED.nsfw THEN NULL ELSE bangumi_subject.image_url END,
+                nsfw=EXCLUDED.nsfw,
                 favorite_wish=EXCLUDED.favorite_wish,
                 favorite_done=EXCLUDED.favorite_done,
                 favorite_doing=EXCLUDED.favorite_doing,
                 favorite_on_hold=EXCLUDED.favorite_on_hold,
-                favorite_dropped=EXCLUDED.favorite_dropped
+                favorite_dropped=EXCLUDED.favorite_dropped,
+                enriched=CASE
+                    WHEN bangumi_subject.nsfw = TRUE AND EXCLUDED.nsfw = FALSE THEN FALSE
+                    ELSE bangumi_subject.enriched
+                END,
+                source_updated_at=EXCLUDED.source_updated_at
             """.trimIndent(),
         ).use { statement ->
-            values.filter { it.type in setOf(2, 4) && !it.nsfw && !it.childOriented() }.forEach { value ->
-                val nameCn = value.nameCn.trim().ifBlank { value.name.takeIf(String::containsHan).orEmpty() }
-                if (nameCn.isBlank()) return@forEach
+            values.filter { it.type in setOf(2, 4) && !it.childOriented() }.forEach { value ->
+                // 中文名不是数据完整性的前提；缺失时保留原名，避免系统性漏掉海外游戏和 Galgame。
+                val displayName = value.nameCn.trim().ifBlank { value.name.trim() }
+                if (displayName.isBlank()) return@forEach
                 statement.setString(1, generation); statement.setLong(2, value.id); statement.setInt(3, value.type)
-                statement.setString(4, value.name); statement.setString(5, nameCn); statement.setString(6, value.summary)
+                statement.setString(4, value.name); statement.setString(5, displayName); statement.setString(6, value.summary)
                 statement.setBoolean(7, value.nsfw); statement.setLong(8, value.favorite.wish)
                 statement.setLong(9, value.favorite.done); statement.setLong(10, value.favorite.doing)
                 statement.setLong(11, value.favorite.onHold); statement.setLong(12, value.favorite.dropped)

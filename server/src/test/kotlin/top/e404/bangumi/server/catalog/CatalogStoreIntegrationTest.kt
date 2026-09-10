@@ -36,6 +36,8 @@ class CatalogStoreIntegrationTest {
                 ArchiveSubject(23, 4, "Game 4", "冷门游戏二", favorite = ArchiveFavorite(done = 90)),
                 ArchiveSubject(24, 4, "Game 5", "冷门游戏三", favorite = ArchiveFavorite(done = 2)),
                 ArchiveSubject(25, 4, "Game 6", "冷门游戏四", favorite = ArchiveFavorite(done = 1)),
+                ArchiveSubject(26, 4, "Original Name", favorite = ArchiveFavorite(done = 800)),
+                ArchiveSubject(27, 4, "Adult Game", nsfw = true, favorite = ArchiveFavorite(done = 700)),
                 ArchiveSubject(30, 2, "Kids", "儿童", metaTags = listOf("子供向")),
             )
             val collects = listOf(1000L, 900, 800, 100, 90, 80, 1, 1)
@@ -46,11 +48,13 @@ class CatalogStoreIntegrationTest {
                 }
                 yield(ArchiveSubjectCharacter(1, 20, 2, 0))
                 for (subjectId in 21L..25L) yield(ArchiveSubjectCharacter(1, subjectId, 2, 0))
+                yield(ArchiveSubjectCharacter(1, 26, 2, 0))
+                yield(ArchiveSubjectCharacter(1, 27, 2, 0))
                 yield(ArchiveSubjectCharacter(2, 30, 1, 0))
             }
             val imported = store.importArchive(generation, subjects, characters, relations, 1_000)
-            assertEquals(7, imported.subjects)
-            assertEquals(14, imported.relations)
+            assertEquals(9, imported.subjects)
+            assertEquals(16, imported.relations)
 
             store.applyPopularity(generation, PopularitySelector())
             val selected = store.selectedCharacterIds(generation)
@@ -74,6 +78,10 @@ class CatalogStoreIntegrationTest {
             assertTrue(page.items.any { character -> character.works.any { it.id == 20L && it.relation.name == "SUPPORTING" } })
             assertFalse(page.items.any { character -> character.works.any { it.id in 22L..25L } })
             assertFalse(page.items.any { character -> character.works.any { it.id == 30L } })
+            val firstWorks = page.items.first { it.id == 1L }.works.associateBy { it.id }
+            assertEquals("Original Name", firstWorks.getValue(26).name)
+            assertTrue(27L in firstWorks)
+            assertEquals(null, firstWorks.getValue(27).imageUrl)
             assertNotNull(page.items.first().imageUrl)
         }
     }
