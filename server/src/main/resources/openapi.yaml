@@ -30,6 +30,16 @@ paths:
         - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 1000, default: 500 } }
       responses:
         "200": { description: 角色目录分页结果 }
+  /admin/popularity-diagnostics:
+    get:
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - { name: gender, in: query, schema: { type: string, enum: [FEMALE, MALE], default: FEMALE } }
+        - { name: character_id, in: query, schema: { type: integer, minimum: 1 }, description: 可选的精确角色 ID }
+        - { name: max_character_collects, in: query, schema: { type: integer, minimum: 0, default: 20 }, description: 诊断样本的角色收藏数上限，不参与筛选算法 }
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 500, default: 100 } }
+      responses:
+        "200": { description: 角色自身热度、作品收藏热度及入选原因对照 }
   /admin/sync:
     post:
       security: [{ bearerAuth: [] }]

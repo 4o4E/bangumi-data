@@ -62,6 +62,37 @@ data class CatalogWork(
     val relation: CharacterRelation,
     val familiarity: FamiliarityTier,
     val popularityRank: Int,
+    val popularities: List<PopularityMetric> = emptyList(),
+)
+
+@Serializable
+data class CatalogPopularitySample(
+    val characterId: Long,
+    val characterName: String,
+    val characterCollects: Long,
+    val workId: Long,
+    val workName: String,
+    val workType: Int,
+    val workPopularities: List<PopularityMetric>,
+    val relation: CharacterRelation,
+    val familiarity: FamiliarityTier,
+    val popularityRank: Int,
+    val candidateCharacterCount: Int,
+    val selectedCharacterCount: Int,
+    val selectionReason: String? = null,
+)
+
+@Serializable
+data class CatalogPopularityDiagnostics(
+    val generation: String,
+    val algorithmVersion: Int,
+    val gender: CharacterGender,
+    val characterId: Long? = null,
+    val maxCharacterCollects: Long,
+    val workPopularityAvailable: Boolean,
+    val selectedCharacterCount: Long,
+    val matchingCharacterCount: Long,
+    val samples: List<CatalogPopularitySample>,
 )
 
 @Serializable

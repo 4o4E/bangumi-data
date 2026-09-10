@@ -13,6 +13,7 @@ import kotlinx.serialization.json.Json
 import top.e404.bangumi.api.ApiEnvelope
 import top.e404.bangumi.api.CatalogCharacter
 import top.e404.bangumi.api.CatalogPage
+import top.e404.bangumi.api.CatalogPopularityDiagnostics
 import top.e404.bangumi.api.CatalogStatus
 import top.e404.bangumi.api.CharacterGender
 import top.e404.bangumi.api.FamiliarityTier
@@ -50,6 +51,18 @@ class BangumiDataClient(
         parameter("offset", offset)
         parameter("limit", limit)
     }.body<ApiEnvelope<CatalogPage<CatalogCharacter>>>().data
+
+    suspend fun getPopularityDiagnostics(
+        gender: CharacterGender = CharacterGender.FEMALE,
+        characterId: Long? = null,
+        maxCharacterCollects: Long = 20,
+        limit: Int = 100,
+    ): CatalogPopularityDiagnostics = authenticatedGet("$apiBaseUrl/admin/popularity-diagnostics") {
+        parameter("gender", gender.name)
+        characterId?.let { parameter("character_id", it) }
+        parameter("max_character_collects", maxCharacterCollects)
+        parameter("limit", limit)
+    }.body<ApiEnvelope<CatalogPopularityDiagnostics>>().data
 
     private suspend inline fun authenticatedGet(
         url: String,

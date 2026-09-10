@@ -2,6 +2,8 @@ package top.e404.bangumi.server.catalog
 
 import top.e404.bangumi.api.CatalogCharacter
 import top.e404.bangumi.api.CatalogPage
+import top.e404.bangumi.api.CatalogPopularityDiagnostics
+import top.e404.bangumi.api.CatalogPopularitySample
 import top.e404.bangumi.api.CatalogStatus
 import top.e404.bangumi.api.CatalogWork
 import top.e404.bangumi.api.CharacterGender
@@ -19,6 +21,12 @@ import javax.sql.DataSource
 interface CatalogReader {
     fun status(): CatalogStatus
     fun characters(gender: CharacterGender, tiers: Set<FamiliarityTier>, offset: Int, limit: Int): CatalogPage<CatalogCharacter>
+    fun popularityDiagnostics(
+        gender: CharacterGender,
+        characterId: Long?,
+        maxCharacterCollects: Long,
+        limit: Int,
+    ): CatalogPopularityDiagnostics
 }
 
 data class CharacterEnrichment(
@@ -163,22 +171,31 @@ class CatalogStore(private val dataSource: DataSource) : CatalogReader {
 
     fun applyPopularity(generation: String, selector: PopularitySelector): Int {
         val grouped = linkedMapOf<Long, MutableList<PopularityCandidate>>()
+        val subjectTypes = mutableMapOf<Long, Int>()
         dataSource.connection.use { connection ->
             connection.prepareStatement(
                 """
-                SELECT sc.subject_id, sc.character_id, c.collects
+                SELECT sc.subject_id, s.type, sc.character_id, c.collects
                 FROM bangumi_subject_character sc
                 JOIN bangumi_character c ON c.generation_id = sc.generation_id AND c.id = sc.character_id
+                JOIN bangumi_subject s ON s.generation_id = sc.generation_id AND s.id = sc.subject_id
                 WHERE sc.generation_id = ? AND sc.relation_type IN (1, 2)
                 ORDER BY sc.subject_id, c.collects DESC, c.id
                 """.trimIndent(),
             ).use { statement ->
                 statement.setString(1, generation)
                 statement.executeQuery().use { result ->
-                    while (result.next()) grouped.getOrPut(result.getLong(1), ::mutableListOf)
-                        .add(PopularityCandidate(result.getLong(2), result.getLong(3)))
+                    while (result.next()) {
+                        val subjectId = result.getLong(1)
+                        subjectTypes[subjectId] = result.getInt(2)
+                        grouped.getOrPut(subjectId, ::mutableListOf)
+                            .add(PopularityCandidate(result.getLong(3), result.getLong(4)))
+                    }
                 }
             }
+        }
+        val globallyFamiliarByType = grouped.entries.groupBy { subjectTypes.getValue(it.key) }.mapValues { (_, entries) ->
+            selector.selectGlobal(entries.flatMap { it.value }).associateBy(PopularitySelection::characterId)
         }
         dataSource.connection.use { connection ->
             connection.autoCommit = false
@@ -186,22 +203,34 @@ class CatalogStore(private val dataSource: DataSource) : CatalogReader {
                 connection.prepareStatement(
                     """
                     UPDATE bangumi_subject_character
-                    SET popularity_rank = ?, familiarity = ?, selection_reason = ?
+                    SET popularity_rank = ?, familiarity = ?, selection_reason = ?, selection_version = ?
                     WHERE generation_id = ? AND subject_id = ? AND character_id = ?
                     """.trimIndent(),
                 ).use { statement ->
                     grouped.forEach { (subjectId, candidates) ->
                         val fullRank = candidates.sortedWith(compareByDescending<PopularityCandidate> { it.collects }.thenBy { it.characterId })
                             .mapIndexed { index, item -> item.characterId to index + 1 }.toMap()
-                        val selected = selector.select(candidates).associateBy(PopularitySelection::characterId)
+                        val locallyFamiliar = selector.select(candidates).associateBy(PopularitySelection::characterId)
                         candidates.forEach { candidate ->
-                            val choice = selected[candidate.characterId]
+                            val localChoice = locallyFamiliar[candidate.characterId]
+                            val globalChoice = globallyFamiliarByType.getValue(subjectTypes.getValue(subjectId))[candidate.characterId]
+                            val familiarity = when {
+                                localChoice == null || globalChoice == null -> FamiliarityTier.LONG_TAIL
+                                localChoice.tier == FamiliarityTier.CORE && globalChoice.tier == FamiliarityTier.CORE -> FamiliarityTier.CORE
+                                else -> FamiliarityTier.FAMILIAR
+                            }
+                            val reason = when {
+                                localChoice == null -> "LOCAL_TAIL"
+                                globalChoice == null -> "GLOBAL_TAIL"
+                                else -> "${localChoice.reason}_${globalChoice.reason}".take(20)
+                            }
                             statement.setInt(1, fullRank.getValue(candidate.characterId))
-                            statement.setString(2, choice?.tier?.name ?: FamiliarityTier.LONG_TAIL.name)
-                            statement.setString(3, choice?.reason)
-                            statement.setString(4, generation)
-                            statement.setLong(5, subjectId)
-                            statement.setLong(6, candidate.characterId)
+                            statement.setString(2, familiarity.name)
+                            statement.setString(3, reason)
+                            statement.setInt(4, selector.algorithmVersion)
+                            statement.setString(5, generation)
+                            statement.setLong(6, subjectId)
+                            statement.setLong(7, candidate.characterId)
                             statement.addBatch()
                         }
                     }
@@ -230,11 +259,20 @@ class CatalogStore(private val dataSource: DataSource) : CatalogReader {
         }
     }
 
-    fun hasPopularity(generation: String): Boolean = dataSource.connection.use { connection ->
+    fun hasPopularity(
+        generation: String,
+        algorithmVersion: Int = PopularitySelector.ALGORITHM_VERSION,
+    ): Boolean = dataSource.connection.use { connection ->
         connection.prepareStatement(
-            "SELECT EXISTS(SELECT 1 FROM bangumi_subject_character WHERE generation_id = ? AND familiarity IN ('CORE', 'FAMILIAR'))",
+            """
+            SELECT EXISTS(
+                SELECT 1 FROM bangumi_subject_character
+                WHERE generation_id = ? AND selection_version = ? AND familiarity IN ('CORE', 'FAMILIAR')
+            )
+            """.trimIndent(),
         ).use { statement ->
             statement.setString(1, generation)
+            statement.setInt(2, algorithmVersion)
             statement.executeQuery().use { it.next(); it.getBoolean(1) }
         }
     }
@@ -375,7 +413,15 @@ class CatalogStore(private val dataSource: DataSource) : CatalogReader {
             connection.autoCommit = false
             try {
                 val eligible = connection.prepareStatement(
-                    "SELECT COUNT(*) FROM bangumi_character WHERE generation_id = ? AND eligible = TRUE",
+                    """
+                    SELECT COUNT(*) FROM bangumi_character c
+                    WHERE c.generation_id = ? AND c.eligible = TRUE
+                      AND EXISTS (
+                        SELECT 1 FROM bangumi_subject_character sc
+                        WHERE sc.generation_id=c.generation_id AND sc.character_id=c.id
+                          AND sc.familiarity IN ('CORE', 'FAMILIAR')
+                      )
+                    """.trimIndent(),
                 ).use { statement ->
                     statement.setString(1, generation)
                     statement.executeQuery().use { it.next(); it.getLong(1) }
@@ -417,7 +463,13 @@ class CatalogStore(private val dataSource: DataSource) : CatalogReader {
             """
             SELECT s.active_generation_id, s.sync_running, s.sync_phase, s.last_error,
                    g.source_version, g.source_created_at, g.activated_at,
-                   (SELECT COUNT(*) FROM bangumi_character c WHERE c.generation_id = s.active_generation_id AND c.eligible = TRUE)
+                   (SELECT COUNT(*) FROM bangumi_character c
+                    WHERE c.generation_id = s.active_generation_id AND c.eligible = TRUE
+                      AND EXISTS (
+                        SELECT 1 FROM bangumi_subject_character sc
+                        WHERE sc.generation_id=c.generation_id AND sc.character_id=c.id
+                          AND sc.familiarity IN ('CORE', 'FAMILIAR')
+                      ))
             FROM bangumi_catalog_state s LEFT JOIN bangumi_catalog_generation g ON g.id = s.active_generation_id
             WHERE s.singleton = TRUE
             """.trimIndent(),
@@ -475,17 +527,135 @@ class CatalogStore(private val dataSource: DataSource) : CatalogReader {
         }
     }
 
+    /** 对照角色自身热度与所属作品热度，用于识别冷门角色来自哪一层筛选。 */
+    override fun popularityDiagnostics(
+        gender: CharacterGender,
+        characterId: Long?,
+        maxCharacterCollects: Long,
+        limit: Int,
+    ): CatalogPopularityDiagnostics {
+        val generation = status().generation
+            ?: return CatalogPopularityDiagnostics("", 0, gender, characterId, maxCharacterCollects, false, 0, 0, emptyList())
+        return dataSource.connection.use { connection ->
+            val workPopularityAvailable = connection.prepareStatement(
+                """
+                SELECT EXISTS(SELECT 1 FROM bangumi_subject WHERE generation_id=? AND favorite_wish IS NOT NULL)
+                   AND NOT EXISTS(SELECT 1 FROM bangumi_subject WHERE generation_id=? AND favorite_wish IS NULL)
+                """.trimIndent(),
+            ).use { statement ->
+                statement.setString(1, generation)
+                statement.setString(2, generation)
+                statement.executeQuery().use { result -> result.next(); result.getBoolean(1) }
+            }
+            val counts = connection.prepareStatement(
+                """
+                SELECT COUNT(DISTINCT c.id), COUNT(DISTINCT c.id) FILTER (WHERE c.collects <= ?)
+                FROM bangumi_character c
+                WHERE c.generation_id = ? AND c.gender = ? AND c.eligible = TRUE
+                  AND (CAST(? AS BIGINT) IS NULL OR c.id = ?)
+                  AND EXISTS (
+                    SELECT 1 FROM bangumi_subject_character sc
+                    WHERE sc.generation_id = c.generation_id AND sc.character_id = c.id
+                      AND sc.familiarity IN ('CORE', 'FAMILIAR')
+                  )
+                """.trimIndent(),
+            ).use { statement ->
+                statement.setLong(1, maxCharacterCollects)
+                statement.setString(2, generation)
+                statement.setString(3, gender.name)
+                statement.setObject(4, characterId, java.sql.Types.BIGINT)
+                statement.setObject(5, characterId, java.sql.Types.BIGINT)
+                statement.executeQuery().use { result -> result.next(); result.getLong(1) to result.getLong(2) }
+            }
+            val samples = connection.prepareStatement(
+                """
+                WITH work_stats AS (
+                    SELECT subject_id,
+                           COUNT(*) FILTER (WHERE relation_type IN (1, 2)) AS candidate_count,
+                           COUNT(*) FILTER (WHERE familiarity IN ('CORE', 'FAMILIAR')) AS selected_count
+                    FROM bangumi_subject_character
+                    WHERE generation_id = ?
+                    GROUP BY subject_id
+                )
+                SELECT c.id,c.name_cn,c.collects,s.id,s.name_cn,s.type,
+                       s.favorite_wish,s.favorite_done,s.favorite_doing,s.favorite_on_hold,s.favorite_dropped,
+                       sc.relation_type,sc.familiarity,sc.popularity_rank,stats.candidate_count,stats.selected_count,
+                       sc.selection_reason
+                FROM bangumi_subject_character sc
+                JOIN bangumi_character c ON c.generation_id=sc.generation_id AND c.id=sc.character_id
+                JOIN bangumi_subject s ON s.generation_id=sc.generation_id AND s.id=sc.subject_id
+                JOIN work_stats stats ON stats.subject_id=sc.subject_id
+                WHERE sc.generation_id=? AND c.gender=? AND c.eligible=TRUE AND c.collects<=?
+                  AND (CAST(? AS BIGINT) IS NULL OR c.id = ?)
+                  AND (CAST(? AS BIGINT) IS NOT NULL OR sc.familiarity IN ('CORE', 'FAMILIAR'))
+                ORDER BY c.collects,
+                         COALESCE(s.favorite_wish+s.favorite_done+s.favorite_doing+s.favorite_on_hold+s.favorite_dropped, -1) DESC,
+                         c.id, s.id
+                LIMIT ?
+                """.trimIndent(),
+            ).use { statement ->
+                statement.setString(1, generation)
+                statement.setString(2, generation)
+                statement.setString(3, gender.name)
+                statement.setLong(4, maxCharacterCollects)
+                statement.setObject(5, characterId, java.sql.Types.BIGINT)
+                statement.setObject(6, characterId, java.sql.Types.BIGINT)
+                statement.setObject(7, characterId, java.sql.Types.BIGINT)
+                statement.setInt(8, limit)
+                statement.executeQuery().use { result ->
+                    buildList {
+                        while (result.next()) add(
+                            CatalogPopularitySample(
+                                characterId = result.getLong(1),
+                                characterName = result.getString(2),
+                                characterCollects = result.getLong(3),
+                                workId = result.getLong(4),
+                                workName = result.getString(5),
+                                workType = result.getInt(6),
+                                workPopularities = result.workPopularities(7),
+                                relation = relation(result.getInt(12)),
+                                familiarity = FamiliarityTier.valueOf(result.getString(13)),
+                                popularityRank = result.getInt(14),
+                                candidateCharacterCount = result.getInt(15),
+                                selectedCharacterCount = result.getInt(16),
+                                selectionReason = result.getString(17),
+                            ),
+                        )
+                    }
+                }
+            }
+            CatalogPopularityDiagnostics(
+                generation, PopularitySelector.ALGORITHM_VERSION, gender, characterId, maxCharacterCollects,
+                workPopularityAvailable, counts.first, counts.second, samples,
+            )
+        }
+    }
+
     private fun importSubjects(connection: Connection, generation: String, values: Sequence<ArchiveSubject>, sourceTime: Long): Long {
         var count = 0L
         connection.prepareStatement(
-            "INSERT INTO bangumi_subject(generation_id,id,type,name,name_cn,summary,image_url,nsfw,source_updated_at) VALUES (?,?,?,?,?,?,NULL,?,?) ON CONFLICT (generation_id,id) DO NOTHING",
+            """
+            INSERT INTO bangumi_subject(
+                generation_id,id,type,name,name_cn,summary,image_url,nsfw,
+                favorite_wish,favorite_done,favorite_doing,favorite_on_hold,favorite_dropped,source_updated_at
+            ) VALUES (?,?,?,?,?,?,NULL,?,?,?,?,?,?,?)
+            ON CONFLICT (generation_id,id) DO UPDATE SET
+                favorite_wish=EXCLUDED.favorite_wish,
+                favorite_done=EXCLUDED.favorite_done,
+                favorite_doing=EXCLUDED.favorite_doing,
+                favorite_on_hold=EXCLUDED.favorite_on_hold,
+                favorite_dropped=EXCLUDED.favorite_dropped
+            """.trimIndent(),
         ).use { statement ->
             values.filter { it.type in setOf(2, 4) && !it.nsfw && !it.childOriented() }.forEach { value ->
                 val nameCn = value.nameCn.trim().ifBlank { value.name.takeIf(String::containsHan).orEmpty() }
                 if (nameCn.isBlank()) return@forEach
                 statement.setString(1, generation); statement.setLong(2, value.id); statement.setInt(3, value.type)
                 statement.setString(4, value.name); statement.setString(5, nameCn); statement.setString(6, value.summary)
-                statement.setBoolean(7, value.nsfw); statement.setLong(8, sourceTime); statement.addBatch(); count++
+                statement.setBoolean(7, value.nsfw); statement.setLong(8, value.favorite.wish)
+                statement.setLong(9, value.favorite.done); statement.setLong(10, value.favorite.doing)
+                statement.setLong(11, value.favorite.onHold); statement.setLong(12, value.favorite.dropped)
+                statement.setLong(13, sourceTime); statement.addBatch(); count++
                 if (count % BATCH_SIZE == 0L) {
                     statement.executeBatch()
                     connection.commit()
@@ -550,7 +720,8 @@ class CatalogStore(private val dataSource: DataSource) : CatalogReader {
     private fun loadWorks(connection: Connection, generation: String, characterIds: List<Long>): Map<Long, List<CatalogWork>> {
         return connection.prepareStatement(
             """
-            SELECT sc.character_id,s.id,s.type,s.name_cn,s.image_url,sc.relation_type,sc.familiarity,sc.popularity_rank
+            SELECT sc.character_id,s.id,s.type,s.name_cn,s.image_url,sc.relation_type,sc.familiarity,sc.popularity_rank,
+                   s.favorite_wish,s.favorite_done,s.favorite_doing,s.favorite_on_hold,s.favorite_dropped
             FROM bangumi_subject_character sc JOIN bangumi_subject s ON s.generation_id=sc.generation_id AND s.id=sc.subject_id
             WHERE sc.generation_id=? AND sc.character_id=ANY(?) ORDER BY sc.character_id,sc.familiarity,sc.popularity_rank,s.id
             """.trimIndent(),
@@ -560,7 +731,8 @@ class CatalogStore(private val dataSource: DataSource) : CatalogReader {
                 buildMap<Long, MutableList<CatalogWork>> {
                     while (result.next()) getOrPut(result.getLong(1), ::mutableListOf).add(
                         CatalogWork(result.getLong(2), result.getInt(3), result.getString(4), result.getString(5),
-                            relation(result.getInt(6)), FamiliarityTier.valueOf(result.getString(7)), result.getInt(8)),
+                            relation(result.getInt(6)), FamiliarityTier.valueOf(result.getString(7)), result.getInt(8),
+                            result.workPopularities(9)),
                     )
                 }
             }
@@ -569,6 +741,19 @@ class CatalogStore(private val dataSource: DataSource) : CatalogReader {
 
     private data class CharacterRow(val id: Long, val name: String, val aliases: List<String>, val description: String?, val imageUrl: String, val collects: Long, val sourceUpdatedAt: Long)
     private fun ResultSet.toCharacterRow() = CharacterRow(getLong(1), getString(2), (getArray(3).array as Array<*>).map { it.toString() }, getString(4), getString(5), getLong(6), getLong(7))
+    private fun ResultSet.workPopularities(start: Int): List<PopularityMetric> {
+        val values = (start until start + 5).map { index -> getLong(index).let { if (wasNull()) null else it } }
+        if (values.any { it == null }) return emptyList()
+        val favorites = values.filterNotNull()
+        return listOf(
+            PopularityMetric("bangumi", "favorites", favorites.sum()),
+            PopularityMetric("bangumi", "favorite_wish", favorites[0]),
+            PopularityMetric("bangumi", "favorite_done", favorites[1]),
+            PopularityMetric("bangumi", "favorite_doing", favorites[2]),
+            PopularityMetric("bangumi", "favorite_on_hold", favorites[3]),
+            PopularityMetric("bangumi", "favorite_dropped", favorites[4]),
+        )
+    }
     private fun ResultSet.nullableLong(index: Int): Long? = getLong(index).let { if (wasNull()) null else it }
     private fun relation(value: Int) = when (value) { 1 -> CharacterRelation.PROTAGONIST; 2 -> CharacterRelation.SUPPORTING; else -> CharacterRelation.CAMEO }
 

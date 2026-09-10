@@ -47,7 +47,7 @@ class CatalogStoreIntegrationTest {
 
             store.applyPopularity(generation, PopularitySelector())
             val selected = store.selectedCharacterIds(generation)
-            assertEquals(setOf(1L, 2, 3, 4, 5, 6), selected.toSet())
+            assertEquals(setOf(1L, 2, 3), selected.toSet())
             selected.forEach { id ->
                 store.saveCharacterEnrichment(
                     generation,
@@ -61,9 +61,9 @@ class CatalogStoreIntegrationTest {
 
             val status = store.status()
             assertEquals(generation, status.generation)
-            assertEquals(6, status.characterCount)
+            assertEquals(3, status.characterCount)
             val page = store.characters(CharacterGender.FEMALE, setOf(FamiliarityTier.CORE, FamiliarityTier.FAMILIAR), 0, 100)
-            assertEquals(6, page.total)
+            assertEquals(3, page.total)
             assertTrue(page.items.any { character -> character.works.any { it.id == 20L && it.relation.name == "SUPPORTING" } })
             assertFalse(page.items.any { character -> character.works.any { it.id == 30L } })
             assertNotNull(page.items.first().imageUrl)

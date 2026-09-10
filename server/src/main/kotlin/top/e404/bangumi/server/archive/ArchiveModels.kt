@@ -7,6 +7,15 @@ import kotlinx.serialization.Serializable
 data class ArchiveTag(val name: String = "", val count: Int = 0)
 
 @Serializable
+data class ArchiveFavorite(
+    val wish: Long = 0,
+    val done: Long = 0,
+    val doing: Long = 0,
+    @SerialName("on_hold") val onHold: Long = 0,
+    val dropped: Long = 0,
+)
+
+@Serializable
 data class ArchiveSubject(
     val id: Long,
     val type: Int,
@@ -16,6 +25,7 @@ data class ArchiveSubject(
     val nsfw: Boolean = false,
     val tags: List<ArchiveTag> = emptyList(),
     @SerialName("meta_tags") val metaTags: List<String> = emptyList(),
+    val favorite: ArchiveFavorite = ArchiveFavorite(),
 )
 
 @Serializable

@@ -26,4 +26,15 @@ class PopularitySelectorTest {
         }
         assertEquals(PopularitySelector().select(candidates), PopularitySelector().select(candidates))
     }
+
+    @Test
+    fun `全站热度保护只保留最高热度簇`() {
+        val selected = PopularitySelector().selectGlobal(
+            listOf(1000L, 900, 800, 100, 90, 80, 1, 1).mapIndexed { index, collects ->
+                PopularityCandidate(index.toLong() + 1, collects)
+            },
+        )
+
+        assertEquals(setOf(1L, 2, 3), selected.map { it.characterId }.toSet())
+    }
 }

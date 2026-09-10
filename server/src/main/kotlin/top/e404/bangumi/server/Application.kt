@@ -96,6 +96,16 @@ fun Application.configureApplication(
                     val limit = call.request.queryParameters["limit"]?.toIntOrNull()?.coerceIn(1, 1_000) ?: 500
                     call.respond(ApiEnvelope(catalog.characters(gender, tiers, offset, limit)))
                 }
+                get("/admin/popularity-diagnostics") {
+                    val gender = call.request.queryParameters["gender"]?.let {
+                        runCatching { CharacterGender.valueOf(it.uppercase()) }.getOrNull()
+                    } ?: CharacterGender.FEMALE
+                    val characterId = call.request.queryParameters["character_id"]?.toLongOrNull()?.takeIf { it > 0 }
+                    val maxCollects = call.request.queryParameters["max_character_collects"]?.toLongOrNull()
+                        ?.coerceAtLeast(0) ?: 20
+                    val limit = call.request.queryParameters["limit"]?.toIntOrNull()?.coerceIn(1, 500) ?: 100
+                    call.respond(ApiEnvelope(catalog.popularityDiagnostics(gender, characterId, maxCollects, limit)))
+                }
                 post("/admin/sync") {
                     val force = call.request.queryParameters["force"]?.toBooleanStrictOrNull() ?: false
                     if (launchSync(force)) call.respond(HttpStatusCode.Accepted, ApiEnvelope(mapOf("started" to true)))
@@ -120,4 +130,7 @@ private object EmptyCatalogReader : CatalogReader {
         offset: Int,
         limit: Int,
     ) = top.e404.bangumi.api.CatalogPage<top.e404.bangumi.api.CatalogCharacter>(emptyList(), offset, limit, 0, "")
+
+    override fun popularityDiagnostics(gender: CharacterGender, characterId: Long?, maxCharacterCollects: Long, limit: Int) =
+        top.e404.bangumi.api.CatalogPopularityDiagnostics("", 0, gender, characterId, maxCharacterCollects, false, 0, 0, emptyList())
 }
