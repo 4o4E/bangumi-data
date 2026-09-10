@@ -172,10 +172,14 @@ class CatalogStore(private val dataSource: DataSource) : CatalogReader {
     fun applyPopularity(generation: String, selector: PopularitySelector): Int {
         val grouped = linkedMapOf<Long, MutableList<PopularityCandidate>>()
         val subjectTypes = mutableMapOf<Long, Int>()
+        val subjectFavorites = mutableMapOf<Long, Long>()
         dataSource.connection.use { connection ->
             connection.prepareStatement(
                 """
-                SELECT sc.subject_id, s.type, sc.character_id, c.collects
+                SELECT sc.subject_id, s.type, sc.character_id, c.collects,
+                       COALESCE(s.favorite_wish, 0) + COALESCE(s.favorite_done, 0) +
+                       COALESCE(s.favorite_doing, 0) + COALESCE(s.favorite_on_hold, 0) +
+                       COALESCE(s.favorite_dropped, 0)
                 FROM bangumi_subject_character sc
                 JOIN bangumi_character c ON c.generation_id = sc.generation_id AND c.id = sc.character_id
                 JOIN bangumi_subject s ON s.generation_id = sc.generation_id AND s.id = sc.subject_id
@@ -188,6 +192,7 @@ class CatalogStore(private val dataSource: DataSource) : CatalogReader {
                     while (result.next()) {
                         val subjectId = result.getLong(1)
                         subjectTypes[subjectId] = result.getInt(2)
+                        subjectFavorites[subjectId] = result.getLong(5)
                         grouped.getOrPut(subjectId, ::mutableListOf)
                             .add(PopularityCandidate(result.getLong(3), result.getLong(4)))
                     }
@@ -196,6 +201,11 @@ class CatalogStore(private val dataSource: DataSource) : CatalogReader {
         }
         val globallyFamiliarByType = grouped.entries.groupBy { subjectTypes.getValue(it.key) }.mapValues { (_, entries) ->
             selector.selectGlobal(entries.flatMap { it.value }).associateBy(PopularitySelection::characterId)
+        }
+        val familiarWorksByType = subjectTypes.entries.groupBy { it.value }.mapValues { (_, subjects) ->
+            selector.selectGlobal(subjects.map { subject ->
+                PopularityCandidate(subject.key, subjectFavorites.getValue(subject.key))
+            }).associateBy(PopularitySelection::characterId)
         }
         dataSource.connection.use { connection ->
             connection.autoCommit = false
@@ -214,15 +224,19 @@ class CatalogStore(private val dataSource: DataSource) : CatalogReader {
                         candidates.forEach { candidate ->
                             val localChoice = locallyFamiliar[candidate.characterId]
                             val globalChoice = globallyFamiliarByType.getValue(subjectTypes.getValue(subjectId))[candidate.characterId]
+                            val workChoice = familiarWorksByType.getValue(subjectTypes.getValue(subjectId))[subjectId]
                             val familiarity = when {
-                                localChoice == null || globalChoice == null -> FamiliarityTier.LONG_TAIL
-                                localChoice.tier == FamiliarityTier.CORE && globalChoice.tier == FamiliarityTier.CORE -> FamiliarityTier.CORE
+                                localChoice == null || globalChoice == null || workChoice == null -> FamiliarityTier.LONG_TAIL
+                                localChoice.tier == FamiliarityTier.CORE && globalChoice.tier == FamiliarityTier.CORE &&
+                                    workChoice.tier == FamiliarityTier.CORE -> FamiliarityTier.CORE
                                 else -> FamiliarityTier.FAMILIAR
                             }
                             val reason = when {
                                 localChoice == null -> "LOCAL_TAIL"
                                 globalChoice == null -> "GLOBAL_TAIL"
-                                else -> "${localChoice.reason}_${globalChoice.reason}".take(20)
+                                workChoice == null -> "WORK_TAIL"
+                                familiarity == FamiliarityTier.CORE -> "ALL_CORE"
+                                else -> "BOUNDARY"
                             }
                             statement.setInt(1, fullRank.getValue(candidate.characterId))
                             statement.setString(2, familiarity.name)
@@ -723,7 +737,12 @@ class CatalogStore(private val dataSource: DataSource) : CatalogReader {
             SELECT sc.character_id,s.id,s.type,s.name_cn,s.image_url,sc.relation_type,sc.familiarity,sc.popularity_rank,
                    s.favorite_wish,s.favorite_done,s.favorite_doing,s.favorite_on_hold,s.favorite_dropped
             FROM bangumi_subject_character sc JOIN bangumi_subject s ON s.generation_id=sc.generation_id AND s.id=sc.subject_id
-            WHERE sc.generation_id=? AND sc.character_id=ANY(?) ORDER BY sc.character_id,sc.familiarity,sc.popularity_rank,s.id
+            WHERE sc.generation_id=? AND sc.character_id=ANY(?)
+              AND sc.familiarity IN ('CORE', 'FAMILIAR')
+            ORDER BY sc.character_id,
+                     COALESCE(s.favorite_wish, 0) + COALESCE(s.favorite_done, 0) + COALESCE(s.favorite_doing, 0) +
+                     COALESCE(s.favorite_on_hold, 0) + COALESCE(s.favorite_dropped, 0) DESC,
+                     sc.popularity_rank,s.id
             """.trimIndent(),
         ).use { statement ->
             statement.setString(1, generation); statement.setArray(2, connection.createArrayOf("int8", characterIds.toTypedArray()))

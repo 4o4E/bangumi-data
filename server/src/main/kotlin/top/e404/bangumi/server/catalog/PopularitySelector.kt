@@ -137,6 +137,6 @@ class PopularitySelector(private val config: PopularitySelectionConfig = Popular
     private data class Split(val highEnd: Int, val middleEnd: Int, val middleMean: Double, val tailMean: Double)
 
     companion object {
-        const val ALGORITHM_VERSION = 2
+        const val ALGORITHM_VERSION = 3
     }
 }
