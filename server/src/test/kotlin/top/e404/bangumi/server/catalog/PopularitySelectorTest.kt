@@ -37,4 +37,15 @@ class PopularitySelectorTest {
 
         assertEquals(setOf(1L, 2, 3), selected.map { it.characterId }.toSet())
     }
+
+    @Test
+    fun `全站复杂分布细分四簇后只保留最高热度层`() {
+        val selected = PopularitySelector().selectGlobal(
+            listOf(10_000L, 9_000, 8_000, 2_000, 1_800, 1_600, 300, 250, 200, 20, 15, 10)
+                .mapIndexed { index, collects -> PopularityCandidate(index.toLong() + 1, collects) },
+        )
+
+        assertEquals(setOf(1L, 2, 3), selected.map { it.characterId }.toSet())
+        assertTrue(selected.all { it.reason == "HIGH" })
+    }
 }

@@ -17,8 +17,9 @@ data class PopularitySelection(
 
 data class PopularitySelectionConfig(
     val middleTailRatio: Double = 4.0,
-    val boundarySimilarity: Double = 0.8,
+    val boundarySimilarity: Double = 0.9,
     val fallbackRatio: Double = 0.25,
+    val globalClusterCount: Int = 4,
 )
 
 /** 按候选集合的热度分布识别熟悉角色，不依赖作品名称、固定收藏阈值或主配角标签。 */
@@ -58,15 +59,18 @@ class PopularitySelector(private val config: PopularitySelectionConfig = Popular
         if (ranked.isEmpty()) return emptyList()
         if (ranked.size < 6) return fallback(ranked)
 
-        val split = fastNaturalSplit(ranked.map { ln1p(it.collects.toDouble()) }) ?: return fallback(ranked)
-        val boundary = ranked[split.highEnd - 1].collects
-        var end = split.highEnd
+        val values = ranked.map { ln1p(it.collects.toDouble()) }
+        val highEnd = fastGlobalHeadEnd(values, config.globalClusterCount)
+            ?: fastGlobalHeadEnd(values, 3)
+            ?: return fallback(ranked)
+        val boundary = ranked[highEnd - 1].collects
+        var end = highEnd
         while (end < ranked.size && ranked[end].collects >= boundary * config.boundarySimilarity) end++
         return ranked.take(end).mapIndexed { index, candidate ->
             PopularitySelection(
                 characterId = candidate.characterId,
-                tier = if (index < split.highEnd) FamiliarityTier.CORE else FamiliarityTier.FAMILIAR,
-                reason = if (index < split.highEnd) "HIGH" else "BOUNDARY",
+                tier = if (index < highEnd) FamiliarityTier.CORE else FamiliarityTier.FAMILIAR,
+                reason = if (index < highEnd) "HIGH" else "BOUNDARY",
                 rank = index + 1,
             )
         }
@@ -101,30 +105,35 @@ class PopularitySelector(private val config: PopularitySelectionConfig = Popular
         return best
     }
 
-    /** 线性复杂度的三簇计算，避免在全站角色集合上使用二次复杂度的穷举分段。 */
-    private fun fastNaturalSplit(values: List<Double>): Split? {
-        var centers = doubleArrayOf(values[values.size * 5 / 6], values[values.size / 2], values[values.size / 6])
-            .sortedArray()
+    /** 线性复杂度识别全站最高热度簇；数据不足以形成细分层级时自动回退三簇。 */
+    private fun fastGlobalHeadEnd(values: List<Double>, clusterCount: Int): Int? {
+        if (clusterCount < 3 || values.size < clusterCount * 2) return null
+        var centers = DoubleArray(clusterCount) { index ->
+            values[values.size * (index * 2 + 1) / (clusterCount * 2)]
+        }.sortedArray()
         for (iteration in 0 until 32) {
-            val sums = DoubleArray(3)
-            val counts = IntArray(3)
+            val sums = DoubleArray(clusterCount)
+            val counts = IntArray(clusterCount)
             values.forEach { value ->
                 val cluster = centers.indices.minBy { index -> abs(value - centers[index]) }
                 sums[cluster] += value
                 counts[cluster]++
             }
             if (counts.any { count -> count == 0 }) return null
-            val updated = DoubleArray(3) { index -> sums[index] / counts[index] }.sortedArray()
+            val updated = DoubleArray(clusterCount) { index -> sums[index] / counts[index] }.sortedArray()
             val converged = centers.indices.all { index -> abs(updated[index] - centers[index]) < 1e-6 }
             centers = updated
             if (converged) break
         }
-        val highBoundary = (centers[1] + centers[2]) / 2
-        val middleBoundary = (centers[0] + centers[1]) / 2
+        val counts = IntArray(clusterCount)
+        values.forEach { value ->
+            counts[centers.indices.minBy { index -> abs(value - centers[index]) }]++
+        }
+        if (counts.any { count -> count < 2 }) return null
+        val highBoundary = (centers[clusterCount - 2] + centers[clusterCount - 1]) / 2
         val highEnd = values.count { it >= highBoundary }
-        val middleEnd = values.count { it >= middleBoundary }
-        if (highEnd < 2 || middleEnd - highEnd < 2 || values.size - middleEnd < 2) return null
-        return Split(highEnd, middleEnd, centers[1], centers[0])
+        if (highEnd < 2 || values.size - highEnd < 2) return null
+        return highEnd
     }
 
     private fun sse(prefix: DoubleArray, squares: DoubleArray, start: Int, end: Int): Double {
@@ -137,6 +146,6 @@ class PopularitySelector(private val config: PopularitySelectionConfig = Popular
     private data class Split(val highEnd: Int, val middleEnd: Int, val middleMean: Double, val tailMean: Double)
 
     companion object {
-        const val ALGORITHM_VERSION = 4
+        const val ALGORITHM_VERSION = 5
     }
 }
