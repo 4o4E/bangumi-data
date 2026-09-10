@@ -11,7 +11,7 @@
 - 所有业务接口使用 `BANGUMI_DATA_TOKEN` Bearer token；token 不写入数据库或配置文件。
 - 服务镜像发布到 GitHub Container Registry（GHCR）。
 
-当前提交已经建立模块、鉴权、健康检查、客户端骨架、容器和发布流水线；PostgreSQL schema、Archive 导入器、v0 刷新和熟悉度算法将在后续实现。
+当前服务已包含 PostgreSQL schema、Archive 导入、Bangumi v0 补充、断点续采和版本化熟悉度算法。
 
 - 社区案例调研：[`docs/research/community-cases.md`](docs/research/community-cases.md)
 - 分项方案与反选表：[`docs/architecture-options.md`](docs/architecture-options.md)
@@ -52,16 +52,16 @@ Bangumi v0 API ──┘              └───────> 稳定查询 API
 | `BANGUMI_DATA_REQUEST_DELAY_MS` | 否 | Bangumi v0 详情请求的最小间隔，默认 250ms |
 | `BANGUMI_DATA_DIRECTORY` | 否 | 下载临时目录，默认 `data` |
 | `HTTPS_PROXY` / `HTTP_PROXY` | 否 | Archive 下载和 Bangumi v0 请求使用的 HTTP 代理，优先读取 `HTTPS_PROXY` |
-| `BANGUMI_DATA_SYNC_ENABLED` | 否 | 默认 `true`，在同一后端内启用定时同步 |
-| `BANGUMI_DATA_SYNC_INTERVAL_HOURS` | 否 | 默认每 6 小时检查 Archive 版本 |
-| `BANGUMI_DATA_REQUEST_DELAY_MS` | 否 | Bangumi v0 请求间隔，默认 250ms |
-| `BANGUMI_DATA_DIRECTORY` | 否 | Archive 临时下载目录，默认 `data` |
 
 `GET /health` 不返回业务数据，保留为免鉴权的容器健康检查；其他接口必须发送 `Authorization: Bearer <token>`。
 
 ## 数据同步
 
-服务首次启动后会在后台读取官方 Archive：只导入动画、游戏、角色和完整作品—角色关系，过滤 NSFW、儿童向及缺少中文作品名的条目。熟悉度由每部作品内角色 `collects` 的 log 分布、三段自然聚类和边界相近值计算，不使用固定作品名单，也不直接按主角/配角截断。最终候选再通过 Bangumi v0 补齐性别、中文名、别名和图片。Archive 基线与详情补充均按批提交，并通过来源摘要和 `enriched` 状态断点续采；首次同步得到第一批有效角色后即可查询，作品信息会继续在后台逐批完善。
+服务首次启动后会在后台读取官方 Archive：只导入动画、游戏、角色和完整作品—角色关系，过滤 NSFW、儿童向及缺少中文作品名的条目。熟悉度先按每部作品内角色 `collects` 的 log 分布、三段自然聚类和边界相近值识别作品内熟悉角色，再用全站角色的同类自适应分布排除绝对热度长尾；不使用固定作品名单、固定收藏数阈值，也不直接按主角/配角截断。算法版本保存在关系记录中，升级后会对当前数据代重新计算。
+
+Archive 的作品收藏状态 `wish`、`done`、`doing`、`on_hold`、`dropped` 会原样保存，并随角色响应返回。诊断接口可以对照角色收藏数、作品总收藏、作品内排名和入选原因，区分冷门作品的头部角色与热门作品中误带出的长尾角色。旧数据代升级后会自动重读一次当前 Archive 补齐这些字段，但会复用已有角色和作品详情补充进度，不采集历史快照。
+
+最终候选再通过 Bangumi v0 补齐性别、中文名、别名和图片。Archive 基线与详情补充均按批提交，并通过来源摘要和 `enriched` 状态断点续采；首次同步得到第一批有效角色后即可查询，作品信息会继续在后台逐批完善。
 
 可用带 token 的管理接口立即触发检查或强制重建：
 
@@ -75,6 +75,8 @@ POST /api/v1/admin/sync?force=true
 ```text
 GET /api/v1/catalog/status
 GET /api/v1/catalog/characters?gender=FEMALE&tiers=CORE,FAMILIAR&offset=0&limit=500
+GET /api/v1/admin/popularity-diagnostics?gender=FEMALE&max_character_collects=20&limit=100
+GET /api/v1/admin/popularity-diagnostics?gender=FEMALE&character_id=215117
 GET /openapi.yaml
 ```
 
@@ -83,6 +85,7 @@ GET /openapi.yaml
 - `GET /openapi.yaml`：OpenAPI 3.1 契约。
 - `GET /api/v1/catalog/status`：活动数据代、来源版本和同步状态。
 - `GET /api/v1/catalog/characters`：按性别和熟悉度分页获取完整角色卡片数据。
+- `GET /api/v1/admin/popularity-diagnostics`：对照低收藏角色与所属作品热度，查询参数只控制诊断范围，不改变目录算法。
 - `POST /api/v1/admin/sync`：手动触发后台同步，可选 `force=true`。
 
 ## Compose 部署
@@ -94,7 +97,7 @@ docker compose pull
 docker compose up -d
 ```
 
-当前固定版本为 `ghcr.io/4o4e/bangumi-data:v0.1.6`；升级时先修改 `docker-compose.yml` 中的镜像标签，再重新执行上述命令。
+当前固定版本为 `ghcr.io/4o4e/bangumi-data:v0.1.7`；升级时先修改 `docker-compose.yml` 中的镜像标签，再重新执行上述命令。
 
 ## 构建
 
@@ -106,7 +109,7 @@ docker compose up -d
 .\gradlew.bat test
 ```
 
-本地构建镜像前先生成运行目录，Dockerfile 本身不在容器内重复下载 Gradle 和 Maven 依赖：
+本地构建镜像前先生成运行目录，Dockerfile 本身不在容器内重复下载 Gradle 和 Maven 依赖。第三方运行库与项目 jar 使用独立镜像层，后续升级只需下载变化的项目层：
 
 ```powershell
 .\gradlew.bat prepareDockerContext
