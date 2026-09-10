@@ -1,8 +1,8 @@
-.git
-.gradle
-.idea
-api-model/build
-http-client/build
-server/build
-data
-.env
+**
+!Dockerfile
+!build/
+!build/docker/
+!build/docker/runtime-libs/
+!build/docker/runtime-libs/**
+!build/docker/application-libs/
+!build/docker/application-libs/**

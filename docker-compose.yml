@@ -14,7 +14,7 @@ services:
       retries: 5
 
   bangumi-data:
-    image: ghcr.io/4o4e/bangumi-data:v0.1.6
+    image: ghcr.io/4o4e/bangumi-data:v0.1.7
     environment:
       BANGUMI_DATA_TOKEN: ${BANGUMI_DATA_TOKEN}
       BANGUMI_DATA_DATABASE_URL: jdbc:postgresql://postgres:5432/bangumi
