@@ -1,6 +1,7 @@
 package top.e404.bangumi.server.catalog
 
 import top.e404.bangumi.api.CharacterGender
+import top.e404.bangumi.api.CatalogImageStatus
 import top.e404.bangumi.api.FamiliarityTier
 import top.e404.bangumi.server.archive.ArchiveCharacter
 import top.e404.bangumi.server.archive.ArchiveFavorite
@@ -65,9 +66,21 @@ class CatalogStoreIntegrationTest {
                     CharacterEnrichment(id, "角色$id", listOf("C$id"), CharacterGender.FEMALE, "中文角色简介内容足够长", "https://example.com/$id.jpg", false),
                 )
             }
-            store.selectedSubjectIds(generation).forEach { id ->
-                store.saveSubjectEnrichment(generation, SubjectEnrichment(id, null, "https://example.com/work-$id.jpg"))
+            val now = 2_000L
+            val outcomes = store.selectedSubjectIds(generation).map { id ->
+                when (id) {
+                    10L -> SubjectEnrichmentOutcome.Failed(id)
+                    20L -> SubjectEnrichmentOutcome.NotFound(id)
+                    26L -> SubjectEnrichmentOutcome.Found(SubjectEnrichment(id, null, null))
+                    27L -> SubjectEnrichmentOutcome.Found(
+                        SubjectEnrichment(id, null, "https://example.com/work-$id.jpg", nsfw = true),
+                    )
+                    else -> SubjectEnrichmentOutcome.Found(
+                        SubjectEnrichment(id, null, "https://example.com/work-$id.jpg"),
+                    )
+                }
             }
+            store.saveSubjectEnrichmentOutcomes(generation, outcomes, now)
             store.activate(generation)
 
             val status = store.status()
@@ -81,7 +94,16 @@ class CatalogStoreIntegrationTest {
             val firstWorks = page.items.first { it.id == 1L }.works.associateBy { it.id }
             assertEquals("Original Name", firstWorks.getValue(26).name)
             assertTrue(27L in firstWorks)
-            assertEquals(null, firstWorks.getValue(27).imageUrl)
+            assertEquals(CatalogImageStatus.FETCH_FAILED, firstWorks.getValue(10).imageStatus)
+            assertEquals(CatalogImageStatus.NOT_FOUND, firstWorks.getValue(20).imageStatus)
+            assertEquals(CatalogImageStatus.MISSING_UPSTREAM, firstWorks.getValue(26).imageStatus)
+            assertEquals(CatalogImageStatus.AVAILABLE, firstWorks.getValue(27).imageStatus)
+            assertEquals("https://example.com/work-27.jpg", firstWorks.getValue(27).imageUrl)
+            assertEquals(listOf(10L), store.pendingEligibleSubjectIds(generation, 100, now))
+            assertEquals(
+                listOf(10L, 20L, 26L),
+                store.pendingEligibleSubjectIds(generation, 100, now + 7 * 24 * 60 * 60 * 1_000L),
+            )
             assertEquals("2025-01-01", page.items.first { it.id == 1L }.works.first { it.id == 20L }.releaseDate)
             assertEquals(4001, page.items.first { it.id == 1L }.works.first { it.id == 20L }.platform)
             assertNotNull(page.items.first().imageUrl)

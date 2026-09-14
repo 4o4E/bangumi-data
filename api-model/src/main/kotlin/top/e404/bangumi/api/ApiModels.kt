@@ -53,6 +53,17 @@ data class PopularityMetric(
     val value: Long,
 )
 
+/** 作品封面的采集状态；URL 为空时消费者可据此区分等待、上游无图和请求失败。 */
+@Serializable
+enum class CatalogImageStatus {
+    PENDING,
+    AVAILABLE,
+    MISSING_UPSTREAM,
+    NOT_FOUND,
+    FETCH_FAILED,
+    UNKNOWN,
+}
+
 @Serializable
 data class CatalogWork(
     val id: Long,
@@ -65,6 +76,7 @@ data class CatalogWork(
     val popularities: List<PopularityMetric> = emptyList(),
     val releaseDate: String? = null,
     val platform: Int? = null,
+    val imageStatus: CatalogImageStatus = CatalogImageStatus.UNKNOWN,
 )
 
 @Serializable

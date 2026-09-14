@@ -46,6 +46,7 @@ class BangumiApiClientTest {
                     val subject = requireNotNull(client.subject(8))
                     assertEquals("测试作品", subject.name)
                     assertEquals(true, subject.nsfw)
+                    assertEquals("https://example.com/subject.jpg", subject.imageUrl)
                 }
             }
             assertTrue(requests.any { it.contains("api.invalid/v0/characters/3") })

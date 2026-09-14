@@ -1,6 +1,7 @@
 package top.e404.bangumi.server.catalog
 
 import top.e404.bangumi.api.CatalogCharacter
+import top.e404.bangumi.api.CatalogImageStatus
 import top.e404.bangumi.api.CatalogPage
 import top.e404.bangumi.api.CatalogPopularityDiagnostics
 import top.e404.bangumi.api.CatalogPopularitySample
@@ -15,6 +16,7 @@ import top.e404.bangumi.server.archive.ArchiveImportSummary
 import top.e404.bangumi.server.archive.ArchiveSubject
 import top.e404.bangumi.server.archive.ArchiveSubjectCharacter
 import java.sql.Connection
+import java.sql.PreparedStatement
 import java.sql.ResultSet
 import java.sql.Types
 import java.time.LocalDate
@@ -42,6 +44,18 @@ data class CharacterEnrichment(
 )
 
 data class SubjectEnrichment(val id: Long, val name: String?, val imageUrl: String?, val nsfw: Boolean? = null)
+
+/** 作品详情请求的独立结果，避免把 404、上游无图和网络失败压成同一个 null。 */
+sealed interface SubjectEnrichmentOutcome {
+    val id: Long
+
+    data class Found(val value: SubjectEnrichment) : SubjectEnrichmentOutcome {
+        override val id: Long get() = value.id
+    }
+
+    data class NotFound(override val id: Long) : SubjectEnrichmentOutcome
+    data class Failed(override val id: Long) : SubjectEnrichmentOutcome
+}
 
 class CatalogStore(private val dataSource: DataSource) : CatalogReader {
     /** 返回 true 表示同一来源数据代已完成 Archive 导入，可直接从未补充记录继续。 */
@@ -349,7 +363,11 @@ class CatalogStore(private val dataSource: DataSource) : CatalogReader {
         }
     }
 
-    fun pendingEligibleSubjectIds(generation: String, limit: Int): List<Long> = dataSource.connection.use { connection ->
+    fun pendingEligibleSubjectIds(
+        generation: String,
+        limit: Int,
+        nowMillis: Long = System.currentTimeMillis(),
+    ): List<Long> = dataSource.connection.use { connection ->
         connection.prepareStatement(
             """
             SELECT DISTINCT sc.subject_id
@@ -357,11 +375,15 @@ class CatalogStore(private val dataSource: DataSource) : CatalogReader {
             JOIN bangumi_character c ON c.generation_id = sc.generation_id AND c.id = sc.character_id
             JOIN bangumi_subject s ON s.generation_id = sc.generation_id AND s.id = sc.subject_id
             WHERE sc.generation_id = ? AND sc.familiarity IN ('CORE', 'FAMILIAR')
-              AND c.eligible = TRUE AND s.enriched = FALSE
+              AND c.eligible = TRUE
+              AND (
+                  s.image_status = 'PENDING'
+                  OR (s.image_status IN ('MISSING_UPSTREAM', 'NOT_FOUND', 'FETCH_FAILED') AND s.image_retry_at <= ?)
+              )
             ORDER BY sc.subject_id LIMIT ?
             """.trimIndent(),
         ).use { statement ->
-            statement.setString(1, generation); statement.setInt(2, limit)
+            statement.setString(1, generation); statement.setLong(2, nowMillis); statement.setInt(3, limit)
             statement.executeQuery().use { result -> buildList { while (result.next()) add(result.getLong(1)) } }
         }
     }
@@ -407,38 +429,70 @@ class CatalogStore(private val dataSource: DataSource) : CatalogReader {
         }
     }
 
-    fun saveSubjectEnrichment(generation: String, value: SubjectEnrichment) =
-        saveSubjectEnrichments(generation, listOf(value))
-
-    fun saveSubjectEnrichments(generation: String, values: List<SubjectEnrichment>) {
-        if (values.isEmpty()) return
+    fun saveSubjectEnrichmentOutcomes(
+        generation: String,
+        outcomes: List<SubjectEnrichmentOutcome>,
+        nowMillis: Long = System.currentTimeMillis(),
+    ) {
+        if (outcomes.isEmpty()) return
         dataSource.connection.use { connection ->
             connection.autoCommit = false
             try {
-                connection.prepareStatement(
+                val foundStatement = connection.prepareStatement(
                     """
                     UPDATE bangumi_subject
                     SET name_cn = COALESCE(NULLIF(?, ''), name_cn),
                         nsfw = COALESCE(?, nsfw),
-                        -- Bangumi 只有条目级 NSFW 标记，没有图片级审核结果；已标记条目不得下发封面。
-                        image_url = CASE WHEN COALESCE(?, nsfw) THEN NULL ELSE ? END,
+                        image_url = ?,
                         enriched = TRUE,
+                        image_status = ?,
+                        image_retry_at = ?,
                         source_updated_at = ?
                     WHERE generation_id = ? AND id = ?
                     """.trimIndent(),
-                ).use { statement ->
-                    val updatedAt = System.currentTimeMillis()
-                    values.forEach { value ->
-                        statement.setString(1, value.name)
-                        statement.setObject(2, value.nsfw, Types.BOOLEAN)
-                        statement.setObject(3, value.nsfw, Types.BOOLEAN)
-                        statement.setString(4, value.imageUrl)
-                        statement.setLong(5, updatedAt)
-                        statement.setString(6, generation)
-                        statement.setLong(7, value.id)
-                        statement.addBatch()
+                )
+                val unavailableStatement = connection.prepareStatement(
+                    """
+                    UPDATE bangumi_subject
+                    SET enriched = ?, image_status = ?, image_retry_at = ?
+                    WHERE generation_id = ? AND id = ?
+                    """.trimIndent(),
+                )
+                foundStatement.use { found ->
+                    unavailableStatement.use { unavailable ->
+                        outcomes.forEach { outcome ->
+                            when (outcome) {
+                                is SubjectEnrichmentOutcome.Found -> {
+                                    val value = outcome.value
+                                    val status = if (value.imageUrl == null) {
+                                        CatalogImageStatus.MISSING_UPSTREAM
+                                    } else {
+                                        CatalogImageStatus.AVAILABLE
+                                    }
+                                    found.setString(1, value.name)
+                                    found.setObject(2, value.nsfw, Types.BOOLEAN)
+                                    found.setString(3, value.imageUrl)
+                                    found.setString(4, status.name)
+                                    if (status == CatalogImageStatus.AVAILABLE) found.setNull(5, Types.BIGINT)
+                                    else found.setLong(5, nowMillis + MISSING_IMAGE_RETRY_MILLIS)
+                                    found.setLong(6, nowMillis)
+                                    found.setString(7, generation)
+                                    found.setLong(8, value.id)
+                                    found.addBatch()
+                                }
+                                is SubjectEnrichmentOutcome.NotFound -> unavailable.addOutcome(
+                                    generation, outcome.id, enriched = true, CatalogImageStatus.NOT_FOUND,
+                                    nowMillis + MISSING_IMAGE_RETRY_MILLIS,
+                                )
+                                is SubjectEnrichmentOutcome.Failed -> unavailable.addOutcome(
+                                    generation, outcome.id, enriched = false, CatalogImageStatus.FETCH_FAILED,
+                                    nowMillis,
+                                )
+                            }
+                        }
+                        found.executeBatch()
+                        unavailable.executeBatch()
                     }
-                    statement.executeBatch()
                 }
                 connection.commit()
             } catch (error: Throwable) {
@@ -687,7 +741,7 @@ class CatalogStore(private val dataSource: DataSource) : CatalogReader {
                 name=EXCLUDED.name,
                 name_cn=EXCLUDED.name_cn,
                 summary=EXCLUDED.summary,
-                image_url=CASE WHEN EXCLUDED.nsfw THEN NULL ELSE bangumi_subject.image_url END,
+                image_url=bangumi_subject.image_url,
                 nsfw=EXCLUDED.nsfw,
                 release_date=EXCLUDED.release_date,
                 platform=EXCLUDED.platform,
@@ -783,7 +837,7 @@ class CatalogStore(private val dataSource: DataSource) : CatalogReader {
             """
             SELECT sc.character_id,s.id,s.type,s.name_cn,s.image_url,sc.relation_type,sc.familiarity,sc.popularity_rank,
                    s.favorite_wish,s.favorite_done,s.favorite_doing,s.favorite_on_hold,s.favorite_dropped,
-                   s.release_date,s.platform
+                   s.release_date,s.platform,s.image_status
             FROM bangumi_subject_character sc JOIN bangumi_subject s ON s.generation_id=sc.generation_id AND s.id=sc.subject_id
             WHERE sc.generation_id=? AND sc.character_id=ANY(?)
               AND sc.familiarity IN ('CORE', 'FAMILIAR')
@@ -801,7 +855,7 @@ class CatalogStore(private val dataSource: DataSource) : CatalogReader {
                             result.getLong(2), result.getInt(3), result.getString(4), result.getString(5),
                             relation(result.getInt(6)), FamiliarityTier.valueOf(result.getString(7)), result.getInt(8),
                             result.workPopularities(9), result.getObject(14, LocalDate::class.java)?.toString(),
-                            result.nullableInt(15),
+                            result.nullableInt(15), CatalogImageStatus.valueOf(result.getString(16)),
                         ),
                     )
                 }
@@ -831,7 +885,26 @@ class CatalogStore(private val dataSource: DataSource) : CatalogReader {
     private fun ResultSet.nullableLong(index: Int): Long? = getLong(index).let { if (wasNull()) null else it }
     private fun relation(value: Int) = when (value) { 1 -> CharacterRelation.PROTAGONIST; 2 -> CharacterRelation.SUPPORTING; else -> CharacterRelation.CAMEO }
 
-    companion object { const val SYNC_LOCK_ID = 0x42474D44L; private const val BATCH_SIZE = 5_000L }
+    companion object {
+        const val SYNC_LOCK_ID = 0x42474D44L
+        private const val BATCH_SIZE = 5_000L
+        private const val MISSING_IMAGE_RETRY_MILLIS = 7 * 24 * 60 * 60 * 1_000L
+    }
+}
+
+private fun PreparedStatement.addOutcome(
+    generation: String,
+    subjectId: Long,
+    enriched: Boolean,
+    status: CatalogImageStatus,
+    retryAt: Long,
+) {
+    setBoolean(1, enriched)
+    setString(2, status.name)
+    setLong(3, retryAt)
+    setString(4, generation)
+    setLong(5, subjectId)
+    addBatch()
 }
 
 private fun ArchiveSubject.childOriented() = "子供向" in metaTags || tags.any { it.name == "子供向" && it.count >= 2 }

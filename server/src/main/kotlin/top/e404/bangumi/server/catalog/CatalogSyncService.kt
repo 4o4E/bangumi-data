@@ -1,5 +1,6 @@
 package top.e404.bangumi.server.catalog
 
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -97,12 +98,30 @@ class CatalogSyncService(
                 val pendingSubjects = store.pendingEligibleSubjectIds(generation!!, Int.MAX_VALUE)
                 var completedSubjects = selectedSubjectCount - pendingSubjects.size
                 pendingSubjects.chunked(ENRICHMENT_BATCH_SIZE).forEach { batch ->
-                    val values = batch.map { id ->
-                        enricher.subject(id) ?: SubjectEnrichment(id, null, null)
+                    val outcomes = mutableListOf<SubjectEnrichmentOutcome>()
+                    var batchFailure: Throwable? = null
+                    var batchFailures = 0
+                    for (id in batch) {
+                        try {
+                            outcomes += enricher.subject(id)?.let(SubjectEnrichmentOutcome::Found)
+                                ?: SubjectEnrichmentOutcome.NotFound(id)
+                        } catch (error: CancellationException) {
+                            throw error
+                        } catch (error: Throwable) {
+                            log.warn("补充 Bangumi 作品详情失败，将在后续同步重试: subject={}", id, error)
+                            outcomes += SubjectEnrichmentOutcome.Failed(id)
+                            batchFailures++
+                            if (batchFailures >= MAX_SUBJECT_FAILURES_PER_BATCH) {
+                                // 上游整体故障时及时结束本轮，避免 100 个请求依次耗尽超时；已记录失败和未处理项都会保留待重试状态。
+                                batchFailure = error
+                                break
+                            }
+                        }
                     }
-                    store.saveSubjectEnrichments(generation!!, values)
-                    completedSubjects += batch.size
-                    log.info("作品详情补充批次完成: {}/{}", completedSubjects, selectedSubjectCount)
+                    store.saveSubjectEnrichmentOutcomes(generation!!, outcomes)
+                    completedSubjects += outcomes.size
+                    log.info("作品详情补充批次处理完成: {}/{}", completedSubjects, selectedSubjectCount)
+                    batchFailure?.let { throw it }
                 }
 
                 store.updateSyncState(true, "ACTIVATING", null)
@@ -144,5 +163,6 @@ class CatalogSyncService(
 
     private companion object {
         const val ENRICHMENT_BATCH_SIZE = 100
+        const val MAX_SUBJECT_FAILURES_PER_BATCH = 3
     }
 }
