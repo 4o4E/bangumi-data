@@ -29,15 +29,15 @@ class CatalogStoreIntegrationTest {
             val generation = "test-${UUID.randomUUID()}"
             store.beginGeneration(generation, "fixture.zip", "sha256:test", 1_000)
             val subjects = sequenceOf(
-                ArchiveSubject(10, 2, "Anime", "动画", tags = listOf(ArchiveTag("奇幻", 10)), favorite = ArchiveFavorite(done = 1_000)),
-                ArchiveSubject(20, 4, "Game", "游戏", favorite = ArchiveFavorite(done = 1_000)),
-                ArchiveSubject(21, 4, "Game 2", "游戏二", favorite = ArchiveFavorite(done = 900)),
-                ArchiveSubject(22, 4, "Game 3", "冷门游戏一", favorite = ArchiveFavorite(done = 100)),
-                ArchiveSubject(23, 4, "Game 4", "冷门游戏二", favorite = ArchiveFavorite(done = 90)),
-                ArchiveSubject(24, 4, "Game 5", "冷门游戏三", favorite = ArchiveFavorite(done = 2)),
-                ArchiveSubject(25, 4, "Game 6", "冷门游戏四", favorite = ArchiveFavorite(done = 1)),
-                ArchiveSubject(26, 4, "Original Name", favorite = ArchiveFavorite(done = 800)),
-                ArchiveSubject(27, 4, "Adult Game", nsfw = true, favorite = ArchiveFavorite(done = 700)),
+                ArchiveSubject(10, 2, "Anime", "动画", tags = listOf(ArchiveTag("奇幻", 10)), favorite = ArchiveFavorite(done = 1_000), date = "2025-01-01", platform = 1),
+                ArchiveSubject(20, 4, "Game", "游戏", favorite = ArchiveFavorite(done = 1_000), date = "2025-01-01", platform = 4001),
+                ArchiveSubject(21, 4, "Game 2", "游戏二", favorite = ArchiveFavorite(done = 900), date = "2025-02-01", platform = 4001),
+                ArchiveSubject(22, 4, "Game 3", "冷门游戏一", favorite = ArchiveFavorite(done = 100), date = "2025-03-01", platform = 4001),
+                ArchiveSubject(23, 4, "Game 4", "冷门游戏二", favorite = ArchiveFavorite(done = 90), date = "2025-04-01", platform = 4001),
+                ArchiveSubject(24, 4, "Game 5", "冷门游戏三", favorite = ArchiveFavorite(done = 2), date = "2025-05-01", platform = 4001),
+                ArchiveSubject(25, 4, "Game 6", "冷门游戏四", favorite = ArchiveFavorite(done = 1), date = "2025-06-01", platform = 4001),
+                ArchiveSubject(26, 4, "Original Name", favorite = ArchiveFavorite(done = 800), date = "2025-07-01", platform = 4001),
+                ArchiveSubject(27, 4, "Adult Game", nsfw = true, favorite = ArchiveFavorite(done = 700), date = "2025-08-01", platform = 4001),
                 ArchiveSubject(30, 2, "Kids", "儿童", metaTags = listOf("子供向")),
             )
             val collects = listOf(1000L, 900, 800, 100, 90, 80, 1, 1)
@@ -82,6 +82,8 @@ class CatalogStoreIntegrationTest {
             assertEquals("Original Name", firstWorks.getValue(26).name)
             assertTrue(27L in firstWorks)
             assertEquals(null, firstWorks.getValue(27).imageUrl)
+            assertEquals("2025-01-01", page.items.first { it.id == 1L }.works.first { it.id == 20L }.releaseDate)
+            assertEquals(4001, page.items.first { it.id == 1L }.works.first { it.id == 20L }.platform)
             assertNotNull(page.items.first().imageUrl)
         }
     }

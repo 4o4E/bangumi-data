@@ -48,4 +48,24 @@ class PopularitySelectorTest {
         assertEquals(setOf(1L, 2, 3), selected.map { it.characterId }.toSet())
         assertTrue(selected.all { it.reason == "HIGH" })
     }
+
+    @Test
+    fun `同期候选出现两倍断层时只剔除最低簇`() {
+        val selected = PopularitySelector().selectContemporary(
+            listOf(120L, 110, 100, 42, 38, 35, 12, 11, 10)
+                .mapIndexed { index, favorites -> PopularityCandidate(index + 1L, favorites) },
+        )
+
+        assertEquals(setOf(1L, 2, 3, 4, 5, 6), selected.map { it.characterId }.toSet())
+    }
+
+    @Test
+    fun `同期候选没有明显断层时完整保留`() {
+        val selected = PopularitySelector().selectContemporary(
+            listOf(180L, 170, 160, 150, 140, 130, 120, 110, 100)
+                .mapIndexed { index, favorites -> PopularityCandidate(index + 1L, favorites) },
+        )
+
+        assertEquals((1L..9L).toSet(), selected.map { it.characterId }.toSet())
+    }
 }

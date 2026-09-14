@@ -20,6 +20,7 @@ data class PopularitySelectionConfig(
     val boundarySimilarity: Double = 0.9,
     val fallbackRatio: Double = 0.25,
     val globalClusterCount: Int = 4,
+    val contemporaryLowMiddleRatio: Double = 2.0,
 )
 
 /** 按候选集合的热度分布识别熟悉角色，不依赖作品名称、固定收藏阈值或主配角标签。 */
@@ -76,6 +77,34 @@ class PopularitySelector(private val config: PopularitySelectionConfig = Popular
         }
     }
 
+    /**
+     * 全局门槛通过后再比较同期作品。只有最低簇与中间簇存在明确断层时才删除最低簇，
+     * 避免连续分布被强制截断，也避免固定保留比例把同期中上游作品一并删掉。
+     */
+    fun selectContemporary(candidates: Collection<PopularityCandidate>): List<PopularitySelection> {
+        val ranked = candidates.filter { it.collects > 0 }.distinctBy { it.characterId }
+            .sortedWith(compareByDescending<PopularityCandidate> { it.collects }.thenBy { it.characterId })
+        if (ranked.size < 6) return retainAll(ranked)
+        val values = ranked.map { ln1p(it.collects.toDouble()) }
+        val clusters = fastClusters(values, 3) ?: return retainAll(ranked)
+        if (exp(clusters.centers[1] - clusters.centers[0]) < config.contemporaryLowMiddleRatio) {
+            return retainAll(ranked)
+        }
+        val lowBoundary = (clusters.centers[0] + clusters.centers[1]) / 2
+        val baseEnd = values.count { it >= lowBoundary }
+        var end = baseEnd
+        val boundary = ranked[baseEnd - 1].collects
+        while (end < ranked.size && ranked[end].collects >= boundary * config.boundarySimilarity) end++
+        return ranked.take(end).mapIndexed { index, candidate ->
+            PopularitySelection(
+                characterId = candidate.characterId,
+                tier = FamiliarityTier.FAMILIAR,
+                reason = if (index < baseEnd) "PERIOD_FAMILIAR" else "PERIOD_BOUNDARY",
+                rank = index + 1,
+            )
+        }
+    }
+
     private fun fallback(ranked: List<PopularityCandidate>): List<PopularitySelection> {
         val count = ceil(ranked.size * config.fallbackRatio.coerceIn(0.0, 1.0)).toInt().coerceAtLeast(1)
         return ranked.take(count).mapIndexed { index, candidate ->
@@ -107,7 +136,16 @@ class PopularitySelector(private val config: PopularitySelectionConfig = Popular
 
     /** 线性复杂度识别全站最高热度簇；数据不足以形成细分层级时自动回退三簇。 */
     private fun fastGlobalHeadEnd(values: List<Double>, clusterCount: Int): Int? {
-        if (clusterCount < 3 || values.size < clusterCount * 2) return null
+        if (clusterCount < 3) return null
+        val clusters = fastClusters(values, clusterCount) ?: return null
+        val highBoundary = (clusters.centers[clusterCount - 2] + clusters.centers[clusterCount - 1]) / 2
+        val highEnd = values.count { it >= highBoundary }
+        if (highEnd < 2 || values.size - highEnd < 2) return null
+        return highEnd
+    }
+
+    private fun fastClusters(values: List<Double>, clusterCount: Int): Clusters? {
+        if (values.size < clusterCount * 2) return null
         var centers = DoubleArray(clusterCount) { index ->
             values[values.size * (index * 2 + 1) / (clusterCount * 2)]
         }.sortedArray()
@@ -126,14 +164,12 @@ class PopularitySelector(private val config: PopularitySelectionConfig = Popular
             if (converged) break
         }
         val counts = IntArray(clusterCount)
-        values.forEach { value ->
-            counts[centers.indices.minBy { index -> abs(value - centers[index]) }]++
-        }
-        if (counts.any { count -> count < 2 }) return null
-        val highBoundary = (centers[clusterCount - 2] + centers[clusterCount - 1]) / 2
-        val highEnd = values.count { it >= highBoundary }
-        if (highEnd < 2 || values.size - highEnd < 2) return null
-        return highEnd
+        values.forEach { value -> counts[centers.indices.minBy { index -> abs(value - centers[index]) }]++ }
+        return if (counts.any { count -> count < 2 }) null else Clusters(centers)
+    }
+
+    private fun retainAll(ranked: List<PopularityCandidate>) = ranked.mapIndexed { index, candidate ->
+        PopularitySelection(candidate.characterId, FamiliarityTier.FAMILIAR, "PERIOD_CONTINUOUS", index + 1)
     }
 
     private fun sse(prefix: DoubleArray, squares: DoubleArray, start: Int, end: Int): Double {
@@ -144,8 +180,9 @@ class PopularitySelector(private val config: PopularitySelectionConfig = Popular
 
     private fun mean(prefix: DoubleArray, start: Int, end: Int) = (prefix[end] - prefix[start]) / (end - start)
     private data class Split(val highEnd: Int, val middleEnd: Int, val middleMean: Double, val tailMean: Double)
+    private data class Clusters(val centers: DoubleArray)
 
     companion object {
-        const val ALGORITHM_VERSION = 5
+        const val ALGORITHM_VERSION = 6
     }
 }

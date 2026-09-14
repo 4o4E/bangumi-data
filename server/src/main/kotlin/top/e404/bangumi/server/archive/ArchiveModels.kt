@@ -26,6 +26,8 @@ data class ArchiveSubject(
     val tags: List<ArchiveTag> = emptyList(),
     @SerialName("meta_tags") val metaTags: List<String> = emptyList(),
     val favorite: ArchiveFavorite = ArchiveFavorite(),
+    val date: String? = null,
+    val platform: Int? = null,
 )
 
 @Serializable

@@ -63,6 +63,8 @@ data class CatalogWork(
     val familiarity: FamiliarityTier,
     val popularityRank: Int,
     val popularities: List<PopularityMetric> = emptyList(),
+    val releaseDate: String? = null,
+    val platform: Int? = null,
 )
 
 @Serializable

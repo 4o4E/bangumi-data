@@ -2,3 +2,4 @@ V001__catalog.sql
 V002__resumable_enrichment.sql
 V003__popularity_diagnostics.sql
 V004__include_original_names_and_nsfw_subjects.sql
+V005__subject_release_cohort.sql
