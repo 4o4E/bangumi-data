@@ -37,7 +37,7 @@ data class CharacterEnrichment(
     val id: Long,
     val name: String,
     val aliases: List<String>,
-    val gender: CharacterGender?,
+    val gender: CharacterGenderScope?,
     val description: String?,
     val imageUrl: String?,
     val nsfw: Boolean,
@@ -591,7 +591,7 @@ class CatalogStore(private val dataSource: DataSource) : CatalogReader {
                 """
                 SELECT COUNT(DISTINCT c.id) FROM bangumi_character c JOIN bangumi_subject_character sc
                   ON sc.generation_id = c.generation_id AND sc.character_id = c.id
-                WHERE c.generation_id = ? AND c.gender = ? AND c.eligible = TRUE AND sc.familiarity = ANY(?)
+                WHERE c.generation_id = ? AND c.gender IN (?, 'BOTH') AND c.eligible = TRUE AND sc.familiarity = ANY(?)
                 """.trimIndent(),
             ).use { statement ->
                 statement.setString(1, generation); statement.setString(2, gender.name)
@@ -603,7 +603,7 @@ class CatalogStore(private val dataSource: DataSource) : CatalogReader {
                 SELECT DISTINCT c.id, c.name_cn, c.aliases, c.summary, c.image_url, c.collects, c.source_updated_at
                 FROM bangumi_character c JOIN bangumi_subject_character sc
                   ON sc.generation_id = c.generation_id AND sc.character_id = c.id
-                WHERE c.generation_id = ? AND c.gender = ? AND c.eligible = TRUE AND sc.familiarity = ANY(?)
+                WHERE c.generation_id = ? AND c.gender IN (?, 'BOTH') AND c.eligible = TRUE AND sc.familiarity = ANY(?)
                 ORDER BY c.id LIMIT ? OFFSET ?
                 """.trimIndent(),
             ).use { statement ->
@@ -648,7 +648,7 @@ class CatalogStore(private val dataSource: DataSource) : CatalogReader {
                 """
                 SELECT COUNT(DISTINCT c.id), COUNT(DISTINCT c.id) FILTER (WHERE c.collects <= ?)
                 FROM bangumi_character c
-                WHERE c.generation_id = ? AND c.gender = ? AND c.eligible = TRUE
+                WHERE c.generation_id = ? AND c.gender IN (?, 'BOTH') AND c.eligible = TRUE
                   AND (CAST(? AS BIGINT) IS NULL OR c.id = ?)
                   AND EXISTS (
                     SELECT 1 FROM bangumi_subject_character sc
@@ -682,7 +682,7 @@ class CatalogStore(private val dataSource: DataSource) : CatalogReader {
                 JOIN bangumi_character c ON c.generation_id=sc.generation_id AND c.id=sc.character_id
                 JOIN bangumi_subject s ON s.generation_id=sc.generation_id AND s.id=sc.subject_id
                 JOIN work_stats stats ON stats.subject_id=sc.subject_id
-                WHERE sc.generation_id=? AND c.gender=? AND c.eligible=TRUE AND c.collects<=?
+                WHERE sc.generation_id=? AND c.gender IN (?, 'BOTH') AND c.eligible=TRUE AND c.collects<=?
                   AND (CAST(? AS BIGINT) IS NULL OR c.id = ?)
                   AND (CAST(? AS BIGINT) IS NOT NULL OR sc.familiarity IN ('CORE', 'FAMILIAR'))
                 ORDER BY c.collects,

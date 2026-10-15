@@ -11,7 +11,7 @@ import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonPrimitive
-import top.e404.bangumi.api.CharacterGender
+import top.e404.bangumi.server.catalog.parseCharacterGenderScope
 import top.e404.bangumi.server.catalog.CharacterEnrichment
 import top.e404.bangumi.server.catalog.SubjectEnrichment
 import top.e404.bangumi.server.net.httpProxyUrl
@@ -53,12 +53,11 @@ class BangumiApiClient(
             CHINESE_KEYS.forEach { addAll(values[it].orEmpty()) }
             addAll(values["别名"].orEmpty())
         }.map(String::trim).filter { it.isNotEmpty() && it != name && it.length <= 100 }.distinct().take(20)
-        val rawGender = root.string("gender") ?: values["性别"]?.firstOrNull()
         return CharacterEnrichment(
             id = id,
             name = name,
             aliases = aliases,
-            gender = rawGender.toGender(),
+            gender = parseCharacterGenderScope(root.string("gender"), values["性别"].orEmpty()),
             description = root.string("summary").toChineseDescription(),
             imageUrl = root.imageUrl(),
             nsfw = root.boolean("nsfw") ?: false,
@@ -137,11 +136,6 @@ private fun JsonElement?.leafStrings(): List<String> = when (this) {
     is JsonArray -> flatMap { it.leafStrings() }
     is JsonObject -> get("v")?.leafStrings() ?: values.flatMap { it.leafStrings() }
     else -> runCatching { listOf(jsonPrimitive.content) }.getOrDefault(emptyList())
-}
-private fun String?.toGender() = when (this?.trim()?.lowercase()) {
-    "female", "女", "女性" -> CharacterGender.FEMALE
-    "male", "男", "男性" -> CharacterGender.MALE
-    else -> null
 }
 private fun String?.toChineseDescription(): String? {
     val text = this?.lineSequence()?.map(String::trim)?.filter(String::isNotEmpty)?.joinToString("\n")?.takeIf(String::isNotEmpty) ?: return null

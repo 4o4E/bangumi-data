@@ -7,7 +7,7 @@ import kotlinx.coroutines.runBlocking
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertTrue
-import top.e404.bangumi.api.CharacterGender
+import top.e404.bangumi.server.catalog.CharacterGenderScope
 
 class BangumiApiClientTest {
     @Test
@@ -41,7 +41,7 @@ class BangumiApiClientTest {
                 runBlocking {
                     val character = requireNotNull(client.character(3))
                     assertEquals("测试角色", character.name)
-                    assertEquals(CharacterGender.FEMALE, character.gender)
+                    assertEquals(CharacterGenderScope.FEMALE, character.gender)
                     assertEquals("Original Name", requireNotNull(client.character(4)).name)
                     val subject = requireNotNull(client.subject(8))
                     assertEquals("测试作品", subject.name)

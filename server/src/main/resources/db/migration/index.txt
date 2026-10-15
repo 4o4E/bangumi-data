@@ -4,3 +4,4 @@ V003__popularity_diagnostics.sql
 V004__include_original_names_and_nsfw_subjects.sql
 V005__subject_release_cohort.sql
 V006__track_subject_image_status.sql
+V007__refresh_character_gender_scopes.sql

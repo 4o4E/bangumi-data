@@ -24,7 +24,7 @@ paths:
     get:
       security: [{ bearerAuth: [] }]
       parameters:
-        - { name: gender, in: query, schema: { type: string, enum: [FEMALE, MALE] } }
+        - { name: gender, in: query, schema: { type: string, enum: [FEMALE, MALE] }, description: "查询资格范围；双形态角色同时属于男女范围，响应 gender 表示本次查询范围" }
         - { name: tiers, in: query, schema: { type: string }, description: 逗号分隔的熟悉度层级 }
         - { name: offset, in: query, schema: { type: integer, minimum: 0, default: 0 } }
         - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 1000, default: 500 } }
@@ -34,7 +34,7 @@ paths:
     get:
       security: [{ bearerAuth: [] }]
       parameters:
-        - { name: gender, in: query, schema: { type: string, enum: [FEMALE, MALE], default: FEMALE } }
+        - { name: gender, in: query, schema: { type: string, enum: [FEMALE, MALE], default: FEMALE }, description: "与角色目录使用相同资格条件，包含符合该范围的双形态角色" }
         - { name: character_id, in: query, schema: { type: integer, minimum: 1 }, description: 可选的精确角色 ID }
         - { name: max_character_collects, in: query, schema: { type: integer, minimum: 0, default: 20 }, description: 诊断样本的角色收藏数上限，不参与筛选算法 }
         - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 500, default: 100 } }

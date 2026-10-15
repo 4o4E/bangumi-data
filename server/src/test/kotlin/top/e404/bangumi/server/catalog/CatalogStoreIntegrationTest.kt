@@ -63,7 +63,7 @@ class CatalogStoreIntegrationTest {
             selected.forEach { id ->
                 store.saveCharacterEnrichment(
                     generation,
-                    CharacterEnrichment(id, "角色$id", listOf("C$id"), CharacterGender.FEMALE, "中文角色简介内容足够长", "https://example.com/$id.jpg", false),
+                    CharacterEnrichment(id, "角色$id", listOf("C$id"), CharacterGenderScope.FEMALE, "中文角色简介内容足够长", "https://example.com/$id.jpg", false),
                 )
             }
             val now = 2_000L

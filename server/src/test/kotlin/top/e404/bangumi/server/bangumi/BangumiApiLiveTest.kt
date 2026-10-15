@@ -1,6 +1,6 @@
 package top.e404.bangumi.server.bangumi
 
-import top.e404.bangumi.api.CharacterGender
+import top.e404.bangumi.server.catalog.CharacterGenderScope
 import top.e404.bangumi.server.archive.ArchiveClient
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -14,7 +14,7 @@ class BangumiApiLiveTest {
         BangumiApiClient(0).use { client ->
             kotlinx.coroutines.runBlocking {
                 val character = assertNotNull(client.character(3))
-                assertEquals(CharacterGender.FEMALE, character.gender)
+                assertEquals(CharacterGenderScope.FEMALE, character.gender)
                 assertTrue(character.name.isNotBlank())
                 assertTrue(assertNotNull(character.imageUrl).startsWith("https://"))
                 assertTrue(assertNotNull(client.subject(8)).imageUrl?.startsWith("https://") == true)

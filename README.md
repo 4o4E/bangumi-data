@@ -63,6 +63,12 @@ Archive 的作品发行日期、载体及收藏状态 `wish`、`done`、`doing`�
 
 最终候选再通过 Bangumi v0 补齐性别、名称、别名和图片；没有中文角色名时使用原名。NSFW 作品与普通作品一样保留 Bangumi 返回的封面，角色本身仍按角色级 NSFW 标记排除。作品封面以 `imageStatus` 的 `PENDING`、`AVAILABLE`、`MISSING_UPSTREAM`、`NOT_FOUND`、`FETCH_FAILED` 区分待补充、可用、上游无图、404 和请求失败：上游无图与 404 每七天复查，请求失败在下一轮同步重试。Archive 基线与详情补充均按批提交，并通过来源摘要和补充状态断点续采；首次同步得到第一批有效角色后即可查询，作品信息会继续在后台逐批完善。
 
+性别按身体形态归类：资料中的“男→女”“生物学上的女”等明确女性身体说明具有女性资格；能在男女身体之间切换的角色同时具有男女资格。身体说明优先于上游派生的单值 `gender`，未识别的资料再使用标准字段；仅女装不视为身体转换，无法识别时保留未知。目录仍要求性别可识别、有角色图片地址、角色非 NSFW 且通过熟悉度筛选。
+
+服务内部使用 `FEMALE`、`MALE`、`BOTH` 表示查询资格，复用既有性别列。公开 API 的参数与响应枚举仍只有 `FEMALE`、`MALE`：查询女性包含女性及双形态，查询男性包含男性及双形态；响应的 `gender` 表示本次查询范围。每个范围按角色 ID 分页去重，目录总数按独立角色计数，不能把男女范围人数相加作为总数；诊断接口使用相同资格条件。
+
+性别解析升级由 `V007__refresh_character_gender_scopes.sql` 一次性安排已通过熟悉度筛选的旧候选重新补充详情，不修改表结构。迁移保留旧详情和可用状态，正常同步按既有批次更新名称、别名、简介、图片地址和性别；重启后只处理未完成记录，不会重复重置已完成批次。同一 Archive 来源无需强制重建，使用普通同步即可继续；消费者已有每日结果不受该迁移影响。
+
 可用带 token 的管理接口立即触发检查或强制重建：
 
 ```text
@@ -97,7 +103,7 @@ docker compose pull
 docker compose up -d
 ```
 
-当前固定版本为 `ghcr.io/4o4e/bangumi-data:v0.1.8`；升级时先修改 `docker-compose.yml` 中的镜像标签，再重新执行上述命令。
+Compose 使用 `ghcr.io/4o4e/bangumi-data:latest`，升级时拉取镜像并重新创建服务。需要固定版本时可使用对应 Release 的标签，例如 `ghcr.io/4o4e/bangumi-data:v0.1.13`。
 
 ## 构建
 
@@ -121,13 +127,13 @@ docker build -t bangumi-data:local .
 推送带 `v` 前缀的 SemVer 标签后，GitHub Actions 会运行测试、构建 `linux/amd64` 与 `linux/arm64` 镜像、发布到 GHCR，并创建同名 GitHub Release：
 
 ```powershell
-git tag v0.1.6
-git push origin v0.1.6
+git tag v0.1.13
+git push origin v0.1.13
 ```
 
 发布产物：
 
 ```text
-ghcr.io/4o4e/bangumi-data:v0.1.6
+ghcr.io/4o4e/bangumi-data:v0.1.13
 ghcr.io/4o4e/bangumi-data:latest
 ```
