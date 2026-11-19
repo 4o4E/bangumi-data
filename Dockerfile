@@ -1,4 +1,4 @@
-FROM eclipse-temurin:17-jre-jammy
+FROM azul-zulu:17.70-17.0.21.1-jre-debian13
 WORKDIR /app
 
 LABEL org.opencontainers.image.source="https://github.com/4o4E/bangumi-data"

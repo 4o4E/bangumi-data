@@ -109,7 +109,7 @@ Compose 使用 `ghcr.io/4o4e/bangumi-data:latest`，升级时拉取镜像并重�
 
 - Kotlin `2.2.21`
 - Gradle Kotlin DSL
-- JDK 11 或更高版本；生产镜像使用 JRE 17
+- JDK 11 或更高版本；生产镜像使用 Azul Zulu JRE 17.0.21.1（Debian 13），包含 [CVE-2026-114938](https://www.cve.org/CVERecord?id=CVE-2026-114938) 的修复。
 
 ```powershell
 .\gradlew.bat test
